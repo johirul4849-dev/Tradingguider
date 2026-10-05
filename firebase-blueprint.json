@@ -1,0 +1,188 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile, trading preferences, risk rules, and discipline score.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "email": { "type": "string", "format": "email", "maxLength": 254 },
+        "photoURL": { "type": "string", "maxLength": 1024 },
+        "preferredMarket": { "type": "string", "enum": ["BTC/USD", "XAU/USD", "BOTH"], "maxLength": 20 },
+        "preferredTimeframe": { "type": "string", "enum": ["1m", "5m", "15m", "30m", "1H", "4H", "1D"], "maxLength": 10 },
+        "experienceLevel": { "type": "string", "enum": ["Beginner", "Intermediate", "Advanced"], "maxLength": 20 },
+        "mainGoal": { "type": "string", "maxLength": 100 },
+        "virtualBalance": { "type": "number" },
+        "riskPreference": { "type": "number" },
+        "maxDailyTrades": { "type": "number" },
+        "maxConsecutiveLosses": { "type": "number" },
+        "postLossCooldownMinutes": { "type": "number" },
+        "lockMode": { "type": "string", "enum": ["Warning", "Soft Lock", "Training Lock"], "maxLength": 20 },
+        "disciplineScore": { "type": "number" },
+        "onboardingCompleted": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "lastLogin": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "email",
+        "photoURL",
+        "preferredMarket",
+        "preferredTimeframe",
+        "experienceLevel",
+        "mainGoal",
+        "virtualBalance",
+        "riskPreference",
+        "maxDailyTrades",
+        "maxConsecutiveLosses",
+        "postLossCooldownMinutes",
+        "lockMode",
+        "disciplineScore",
+        "onboardingCompleted",
+        "createdAt",
+        "lastLogin",
+        "updatedAt"
+      ]
+    },
+    "SimulatedTrade": {
+      "title": "SimulatedTrade",
+      "description": "Recorded simulated or replay trade with entry, SL, TP, modifications, and AI coaching review.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "instrument": { "type": "string", "enum": ["BTC/USD", "XAU/USD"], "maxLength": 20 },
+        "timeframe": { "type": "string", "maxLength": 10 },
+        "mode": { "type": "string", "enum": ["REPLAY", "TERMINAL", "LIVE"], "maxLength": 20 },
+        "direction": { "type": "string", "enum": ["LONG", "SHORT"], "maxLength": 10 },
+        "entryPrice": { "type": "number" },
+        "stopLoss": { "type": "number" },
+        "takeProfit": { "type": "number" },
+        "exitPrice": { "type": "number" },
+        "positionSize": { "type": "number" },
+        "riskPercent": { "type": "number" },
+        "riskAmount": { "type": "number" },
+        "rrRatio": { "type": "number" },
+        "pnl": { "type": "number" },
+        "rMultiple": { "type": "number" },
+        "status": { "type": "string", "enum": ["OPEN", "TAKE_PROFIT", "STOP_LOSS", "BREAKEVEN", "MANUALLY_CLOSED"], "maxLength": 30 },
+        "setupType": { "type": "string", "maxLength": 80 },
+        "userReason": { "type": "string", "maxLength": 1000 },
+        "holdingTimeMinutes": { "type": "number" },
+        "mfe": { "type": "number" },
+        "mae": { "type": "number" },
+        "modificationsCount": { "type": "number" },
+        "modificationsSummary": { "type": "string", "maxLength": 2000 },
+        "disciplineFlags": { "type": "array", "maxLength": 10 },
+        "aiReviewSummary": { "type": "string", "maxLength": 4000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "userId",
+        "instrument",
+        "timeframe",
+        "mode",
+        "direction",
+        "entryPrice",
+        "stopLoss",
+        "takeProfit",
+        "exitPrice",
+        "positionSize",
+        "riskPercent",
+        "riskAmount",
+        "rrRatio",
+        "pnl",
+        "rMultiple",
+        "status",
+        "setupType",
+        "userReason",
+        "holdingTimeMinutes",
+        "mfe",
+        "mae",
+        "modificationsCount",
+        "modificationsSummary",
+        "disciplineFlags",
+        "aiReviewSummary",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "DisciplineEvent": {
+      "title": "DisciplineEvent",
+      "description": "Tracked self-control or rule violation event during trading sessions.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "eventType": { "type": "string", "maxLength": 60 },
+        "severity": { "type": "string", "enum": ["INFO", "WARNING", "VIOLATION"], "maxLength": 20 },
+        "description": { "type": "string", "maxLength": 500 },
+        "scoreImpact": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "eventType", "severity", "description", "scoreImpact", "createdAt"]
+    },
+    "StrategyDefinition": {
+      "title": "StrategyDefinition",
+      "description": "User-defined trading strategy tested in the Strategy Lab.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "maxLength": 100 },
+        "instrument": { "type": "string", "maxLength": 20 },
+        "timeframe": { "type": "string", "maxLength": 10 },
+        "rulesSummary": { "type": "string", "maxLength": 1000 },
+        "minRR": { "type": "number" },
+        "winRate": { "type": "number" },
+        "avgR": { "type": "number" },
+        "totalTrades": { "type": "number" },
+        "maxDrawdown": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "name", "instrument", "timeframe", "rulesSummary", "minRR", "winRate", "avgR", "totalTrades", "maxDrawdown", "createdAt"]
+    },
+    "TrainingProgress": {
+      "title": "TrainingProgress",
+      "description": "Educational course, quiz, and challenge completion progress.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "moduleId": { "type": "string", "maxLength": 100 },
+        "category": { "type": "string", "maxLength": 60 },
+        "completed": { "type": "boolean" },
+        "quizScore": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "moduleId", "category", "completed", "quizScore", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Primary user profile, virtual balance, risk limits, and discipline settings."
+    },
+    "/users/{userId}/trades/{tradeId}": {
+      "schema": { "$ref": "#/entities/SimulatedTrade" },
+      "description": "Simulated and historical replay trades belonging to the user."
+    },
+    "/users/{userId}/disciplineEvents/{eventId}": {
+      "schema": { "$ref": "#/entities/DisciplineEvent" },
+      "description": "Self-control and rule adherence events for the user."
+    },
+    "/users/{userId}/strategies/{strategyId}": {
+      "schema": { "$ref": "#/entities/StrategyDefinition" },
+      "description": "Saved Strategy Lab backtests and rule configurations."
+    },
+    "/users/{userId}/trainingProgress/{progressId}": {
+      "schema": { "$ref": "#/entities/TrainingProgress" },
+      "description": "Course completion and challenge progress records."
+    }
+  }
+}

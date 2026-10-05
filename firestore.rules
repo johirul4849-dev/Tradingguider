@@ -1,0 +1,320 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net: Default deny all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'johirul4891@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function userExists(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId));
+    }
+
+    // Blueprint Validation Helpers
+    function isValidUserProfile(data) {
+      return data.keys().hasAll([
+        'uid', 'displayName', 'email', 'photoURL', 'preferredMarket',
+        'preferredTimeframe', 'experienceLevel', 'mainGoal', 'virtualBalance',
+        'riskPreference', 'maxDailyTrades', 'maxConsecutiveLosses',
+        'postLossCooldownMinutes', 'lockMode', 'disciplineScore',
+        'onboardingCompleted', 'createdAt', 'lastLogin', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'uid', 'displayName', 'email', 'photoURL', 'preferredMarket',
+        'preferredTimeframe', 'experienceLevel', 'mainGoal', 'virtualBalance',
+        'riskPreference', 'maxDailyTrades', 'maxConsecutiveLosses',
+        'postLossCooldownMinutes', 'lockMode', 'disciplineScore',
+        'onboardingCompleted', 'createdAt', 'lastLogin', 'updatedAt'
+      ]) &&
+      data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.uid == request.auth.uid &&
+      data.displayName is string && data.displayName.size() <= 120 &&
+      data.email is string && data.email.size() <= 254 &&
+      data.photoURL is string && data.photoURL.size() <= 1024 &&
+      data.preferredMarket is string && data.preferredMarket.size() <= 20 && data.preferredMarket in ['BTC/USD', 'XAU/USD', 'BOTH'] &&
+      data.preferredTimeframe is string && data.preferredTimeframe.size() <= 10 && data.preferredTimeframe in ['1m', '5m', '15m', '30m', '1H', '4H', '1D'] &&
+      data.experienceLevel is string && data.experienceLevel.size() <= 20 && data.experienceLevel in ['Beginner', 'Intermediate', 'Advanced'] &&
+      data.mainGoal is string && data.mainGoal.size() <= 100 &&
+      data.virtualBalance is number && data.virtualBalance >= 0 && data.virtualBalance <= 100000000 &&
+      data.riskPreference is number && data.riskPreference > 0 && data.riskPreference <= 100 &&
+      data.maxDailyTrades is number && data.maxDailyTrades >= 1 && data.maxDailyTrades <= 100 &&
+      data.maxConsecutiveLosses is number && data.maxConsecutiveLosses >= 1 && data.maxConsecutiveLosses <= 50 &&
+      data.postLossCooldownMinutes is number && data.postLossCooldownMinutes >= 0 && data.postLossCooldownMinutes <= 1440 &&
+      data.lockMode is string && data.lockMode.size() <= 20 && data.lockMode in ['Warning', 'Soft Lock', 'Training Lock'] &&
+      data.disciplineScore is number && data.disciplineScore >= 0 && data.disciplineScore <= 100 &&
+      data.onboardingCompleted is bool &&
+      data.createdAt is timestamp &&
+      data.lastLogin is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidSimulatedTrade(data) {
+      return data.keys().hasAll([
+        'id', 'userId', 'instrument', 'timeframe', 'mode', 'direction',
+        'entryPrice', 'stopLoss', 'takeProfit', 'exitPrice', 'positionSize',
+        'riskPercent', 'riskAmount', 'rrRatio', 'pnl', 'rMultiple', 'status',
+        'setupType', 'userReason', 'holdingTimeMinutes', 'mfe', 'mae',
+        'modificationsCount', 'modificationsSummary', 'disciplineFlags',
+        'aiReviewSummary', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id', 'userId', 'instrument', 'timeframe', 'mode', 'direction',
+        'entryPrice', 'stopLoss', 'takeProfit', 'exitPrice', 'positionSize',
+        'riskPercent', 'riskAmount', 'rrRatio', 'pnl', 'rMultiple', 'status',
+        'setupType', 'userReason', 'holdingTimeMinutes', 'mfe', 'mae',
+        'modificationsCount', 'modificationsSummary', 'disciplineFlags',
+        'aiReviewSummary', 'createdAt', 'updatedAt'
+      ]) &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 && data.userId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.userId == request.auth.uid &&
+      data.instrument is string && data.instrument.size() <= 20 && data.instrument in ['BTC/USD', 'XAU/USD'] &&
+      data.timeframe is string && data.timeframe.size() <= 10 &&
+      data.mode is string && data.mode.size() <= 20 && data.mode in ['REPLAY', 'TERMINAL', 'LIVE'] &&
+      data.direction is string && data.direction.size() <= 10 && data.direction in ['LONG', 'SHORT'] &&
+      data.entryPrice is number && data.entryPrice > 0 &&
+      data.stopLoss is number && data.stopLoss >= 0 &&
+      data.takeProfit is number && data.takeProfit >= 0 &&
+      data.exitPrice is number && data.exitPrice >= 0 &&
+      data.positionSize is number && data.positionSize >= 0 &&
+      data.riskPercent is number && data.riskPercent >= 0 && data.riskPercent <= 100 &&
+      data.riskAmount is number && data.riskAmount >= 0 &&
+      data.rrRatio is number &&
+      data.pnl is number &&
+      data.rMultiple is number &&
+      data.status is string && data.status.size() <= 30 && data.status in ['OPEN', 'TAKE_PROFIT', 'STOP_LOSS', 'BREAKEVEN', 'MANUALLY_CLOSED'] &&
+      data.setupType is string && data.setupType.size() <= 80 &&
+      data.userReason is string && data.userReason.size() <= 1000 &&
+      data.holdingTimeMinutes is number && data.holdingTimeMinutes >= 0 &&
+      data.mfe is number &&
+      data.mae is number &&
+      data.modificationsCount is number && data.modificationsCount >= 0 &&
+      data.modificationsSummary is string && data.modificationsSummary.size() <= 2000 &&
+      data.disciplineFlags is list && data.disciplineFlags.size() <= 10 &&
+      (data.disciplineFlags.size() == 0 || (data.disciplineFlags[0] is string && data.disciplineFlags[0].size() <= 100)) &&
+      data.aiReviewSummary is string && data.aiReviewSummary.size() <= 4000 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidDisciplineEvent(data) {
+      return data.keys().hasAll(['id', 'userId', 'eventType', 'severity', 'description', 'scoreImpact', 'createdAt']) &&
+      data.keys().hasOnly(['id', 'userId', 'eventType', 'severity', 'description', 'scoreImpact', 'createdAt']) &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 && data.userId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.userId == request.auth.uid &&
+      data.eventType is string && data.eventType.size() <= 60 &&
+      data.severity is string && data.severity.size() <= 20 && data.severity in ['INFO', 'WARNING', 'VIOLATION'] &&
+      data.description is string && data.description.size() <= 500 &&
+      data.scoreImpact is number && data.scoreImpact >= -100 && data.scoreImpact <= 100 &&
+      data.createdAt is timestamp;
+    }
+
+    function isValidStrategyDefinition(data) {
+      return data.keys().hasAll(['id', 'userId', 'name', 'instrument', 'timeframe', 'rulesSummary', 'minRR', 'winRate', 'avgR', 'totalTrades', 'maxDrawdown', 'createdAt']) &&
+      data.keys().hasOnly(['id', 'userId', 'name', 'instrument', 'timeframe', 'rulesSummary', 'minRR', 'winRate', 'avgR', 'totalTrades', 'maxDrawdown', 'createdAt']) &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 && data.userId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.userId == request.auth.uid &&
+      data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+      data.instrument is string && data.instrument.size() <= 20 &&
+      data.timeframe is string && data.timeframe.size() <= 10 &&
+      data.rulesSummary is string && data.rulesSummary.size() <= 1000 &&
+      data.minRR is number && data.minRR >= 0.1 && data.minRR <= 50 &&
+      data.winRate is number && data.winRate >= 0 && data.winRate <= 100 &&
+      data.avgR is number &&
+      data.totalTrades is number && data.totalTrades >= 0 &&
+      data.maxDrawdown is number && data.maxDrawdown >= 0 &&
+      data.createdAt is timestamp;
+    }
+
+    function isValidTrainingProgress(data) {
+      return data.keys().hasAll(['id', 'userId', 'moduleId', 'category', 'completed', 'quizScore', 'updatedAt']) &&
+      data.keys().hasOnly(['id', 'userId', 'moduleId', 'category', 'completed', 'quizScore', 'updatedAt']) &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 && data.userId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.userId == request.auth.uid &&
+      data.moduleId is string && data.moduleId.size() <= 100 &&
+      data.category is string && data.category.size() <= 60 &&
+      data.completed is bool &&
+      data.quizScore is number && data.quizScore >= 0 && data.quizScore <= 100 &&
+      data.updatedAt is timestamp;
+    }
+
+    // Boot test connection collection
+    match /test/{docId} {
+      allow get: if true;
+      allow list, write: if false;
+    }
+
+    // Admins lookup collection
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list, create, update, delete: if false;
+    }
+
+    // Users collection (PII isolated to owner or admin)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+
+      allow create: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn() &&
+        isValidUserProfile(incoming()) &&
+        isValidId(userId) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly([
+            'displayName', 'photoURL', 'preferredMarket', 'preferredTimeframe',
+            'experienceLevel', 'mainGoal', 'virtualBalance', 'riskPreference',
+            'maxDailyTrades', 'maxConsecutiveLosses', 'postLossCooldownMinutes',
+            'lockMode', 'disciplineScore', 'onboardingCompleted', 'lastLogin', 'updatedAt'
+          ]))
+        );
+
+      allow delete: if isValidId(userId) && isAdmin();
+
+      // Subcollection: Simulated Trades
+      match /trades/{tradeId} {
+        allow get: if isValidId(userId) && isValidId(tradeId) && (isOwner(userId) || isAdmin()) && userExists(userId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(tradeId) &&
+          isValidSimulatedTrade(incoming()) &&
+          incoming().id == tradeId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          userExists(userId);
+
+        allow update: if isSignedIn() &&
+          isValidSimulatedTrade(incoming()) &&
+          isValidId(userId) &&
+          isValidId(tradeId) &&
+          incoming().id == existing().id &&
+          incoming().userId == existing().userId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          userExists(userId) && (
+            isAdmin() ||
+            // Action 1: Active trade modification or closing
+            (isOwner(userId) && existing().status == 'OPEN' && incoming().diff(existing()).affectedKeys().hasOnly([
+              'stopLoss', 'takeProfit', 'exitPrice', 'pnl', 'rMultiple', 'status',
+              'holdingTimeMinutes', 'mfe', 'mae', 'modificationsCount',
+              'modificationsSummary', 'disciplineFlags', 'aiReviewSummary', 'updatedAt'
+            ])) ||
+            // Action 2: Attaching AI review or journal notes to closed trade
+            (isOwner(userId) && existing().status != 'OPEN' && incoming().status == existing().status && incoming().diff(existing()).affectedKeys().hasOnly([
+              'aiReviewSummary', 'userReason', 'setupType', 'disciplineFlags', 'updatedAt'
+            ]))
+          );
+
+        allow delete: if isValidId(userId) && isValidId(tradeId) && isOwner(userId) && userExists(userId);
+      }
+
+      // Subcollection: Discipline Events
+      match /disciplineEvents/{eventId} {
+        allow get: if isValidId(userId) && isValidId(eventId) && (isOwner(userId) || isAdmin()) && userExists(userId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(eventId) &&
+          isValidDisciplineEvent(incoming()) &&
+          incoming().id == eventId &&
+          incoming().createdAt == request.time &&
+          userExists(userId);
+
+        allow update, delete: if false;
+      }
+
+      // Subcollection: Strategy Definitions
+      match /strategies/{strategyId} {
+        allow get: if isValidId(userId) && isValidId(strategyId) && (isOwner(userId) || isAdmin()) && userExists(userId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(strategyId) &&
+          isValidStrategyDefinition(incoming()) &&
+          incoming().id == strategyId &&
+          incoming().createdAt == request.time &&
+          userExists(userId);
+
+        allow update: if false;
+        allow delete: if isValidId(userId) && isValidId(strategyId) && isOwner(userId) && userExists(userId);
+      }
+
+      // Subcollection: Training Progress
+      match /trainingProgress/{progressId} {
+        allow get: if isValidId(userId) && isValidId(progressId) && (isOwner(userId) || isAdmin()) && userExists(userId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(progressId) &&
+          isValidTrainingProgress(incoming()) &&
+          incoming().id == progressId &&
+          incoming().updatedAt == request.time &&
+          userExists(userId);
+
+        allow update: if isSignedIn() &&
+          isValidTrainingProgress(incoming()) &&
+          isValidId(userId) &&
+          isValidId(progressId) &&
+          incoming().id == existing().id &&
+          incoming().userId == existing().userId &&
+          incoming().updatedAt == request.time &&
+          userExists(userId) && (
+            isAdmin() ||
+            (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly([
+              'completed', 'quizScore', 'updatedAt'
+            ]))
+          );
+
+        allow delete: if false;
+      }
+    }
+  }
+}

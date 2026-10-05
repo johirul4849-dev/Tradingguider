@@ -1,0 +1,6 @@
+{
+  "name": "TradePilot AI",
+  "description": "Practice the Market. Master the Process. An AI-powered trading education, historical market replay, risk management, and behavioural discipline simulation platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
