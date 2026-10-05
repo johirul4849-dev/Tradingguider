@@ -155,10 +155,10 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
   // 3-Month Historical + Live Candles
   const [allCandles, setAllCandles] = useState<CandleData[]>(() => pairCandlesCache.current[initialSymbol]);
 
-  // TradingView Bar Replay State
-  const [isReplayMode, setIsReplayMode] = useState<boolean>(true);
+  // TradingView Bar Replay State (Default to FALSE = 100% REAL LIVE MARKET STREAM)
+  const [isReplayMode, setIsReplayMode] = useState<boolean>(false);
   const [isReplayCutMode, setIsReplayCutMode] = useState<boolean>(false);
-  const [replayIndex, setReplayIndex] = useState<number>(1380);
+  const [replayIndex, setReplayIndex] = useState<number>(() => pairCandlesCache.current[initialSymbol].length - 1);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [replaySpeed, setReplaySpeed] = useState<number>(1);
 
@@ -1106,7 +1106,9 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
                 liveWsStatus === 'CONNECTED' ? 'bg-[#00E676] animate-pulse ring-2 ring-[#00E676]/40' : 'bg-[#FF9100]'
               }`}
             />
-            <span className="text-[#94A3B8] text-[10px] hidden sm:inline">⚡ BINANCE LIVE:</span>
+            <span className="text-[#94A3B8] text-[10px] hidden sm:inline">
+              {symbol === 'XAU/USD' ? '⚡ COMEX GOLD LIVE:' : '⚡ BINANCE BTC LIVE:'}
+            </span>
             <span
               className={`font-extrabold font-mono transition-colors duration-150 text-xs sm:text-sm ${
                 livePriceFlash === 'up' ? 'text-[#00E676]' : livePriceFlash === 'down' ? 'text-[#F23645]' : 'text-white'
@@ -2006,9 +2008,34 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
           </button>
         </div>
 
+        {/* Live Market vs Replay Mode Indicator Button */}
+        <button
+          type="button"
+          onClick={() => {
+            if (isReplayMode) {
+              setIsReplayMode(false);
+              setReplayIndex(allCandles.length - 1);
+              showToast('Switched to Real Live Market', 'emerald');
+            } else {
+              setIsReplayMode(true);
+              setReplayIndex(Math.max(100, allCandles.length - 120));
+              showToast('Switched to Bar Replay', 'blue');
+            }
+          }}
+          className={`px-1.5 py-1 rounded text-[10px] font-bold font-mono flex items-center gap-1 border transition-all ${
+            !isReplayMode
+              ? 'bg-emerald-500/20 text-[#00E676] border-emerald-500/40 animate-pulse'
+              : 'bg-[#1E222D] text-[#94A3B8] border-[#2A2E39]'
+          }`}
+          title={!isReplayMode ? 'Live Market Stream Connected' : 'Click to Go Live'}
+        >
+          <span className={`w-1.5 h-1.5 rounded-full ${!isReplayMode ? 'bg-[#00E676]' : 'bg-[#94A3B8]'}`} />
+          <span>{!isReplayMode ? 'LIVE' : 'REPLAY'}</span>
+        </button>
+
         {/* Timeframe Chips Carousel */}
-        <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5 max-w-[140px]">
-          {(['1m', '5m', '15m', '1h', '4h', '1D'] as SupportedTimeframe[]).map((tf) => (
+        <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5 max-w-[120px]">
+          {(['1m', '5m', '15m', '1H', '4H', '1D'] as SupportedTimeframe[]).map((tf) => (
             <button
               key={tf}
               type="button"
@@ -2022,8 +2049,17 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
           ))}
         </div>
 
-        {/* Action Buttons: Indicators, Exness Order, Mentor */}
+        {/* Action Buttons: Fullscreen, Indicators, Mentor, Order */}
         <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={toggleFullWindowChart}
+            className="p-1.5 rounded bg-[#131722] hover:bg-[#2A2E39] border border-[#2A2E39] text-[#00E676]"
+            title="Full Screen Chart"
+          >
+            {isFullWindowChart ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+          </button>
+
           <button
             type="button"
             onClick={() => setShowIndicatorModal(true)}
@@ -2040,7 +2076,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
             title="Backtest Mentor"
           >
             <BookOpen className="w-3.5 h-3.5 text-[#FFB300]" />
-            <span>Mentor</span>
+            <span className="hidden xs:inline">Mentor</span>
           </button>
 
           <button

@@ -77,8 +77,8 @@ export class MarketDataProvider {
     totalCount = 1500
   ): CandleData[] {
     const isGold = symbol === 'XAU/USD';
-    const basePrice = isGold ? 2760.0 : 76500.0;
-    const volatilityStep = isGold ? 3.4 : 185.0;
+    const basePrice = isGold ? 4178.4 : 86050.0;
+    const volatilityStep = isGold ? 4.2 : 210.0;
     const tfScale = Math.sqrt(TIMEFRAME_SECONDS[timeframe] / 900);
     const stepVol = volatilityStep * tfScale;
 
@@ -107,7 +107,7 @@ export class MarketDataProvider {
 
       const open = currentClose;
       const bodyDelta = (rand() - 0.48 + phaseBias) * stepVol;
-      const close = Number(Math.max(isGold ? 1800 : 25000, open + bodyDelta).toFixed(2));
+      const close = Number(Math.max(isGold ? 3200 : 50000, open + bodyDelta).toFixed(2));
 
       const upperWick = rand() * stepVol * (cyclePos === 47 ? 1.5 : 0.65);
       const lowerWick = rand() * stepVol * (cyclePos === 19 ? 1.6 : 0.65);

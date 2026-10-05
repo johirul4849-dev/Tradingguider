@@ -341,8 +341,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   // Selected Entry Circle for Perfect Entry Blueprint modal
   const [inspectedEntryCircle, setInspectedEntryCircle] = useState<ConfirmationCircle | null>(null);
 
-  // 99% A+ Filter & Execution Blocks Toggles
-  const [filterSniperOnly, setFilterSniperOnly] = useState<boolean>(false);
+  // Execution Blocks Toggles
   const [showExecutionBlocks, setShowExecutionBlocks] = useState<boolean>(true);
 
   const effectiveConfirmationCircles = useMemo(() => {
@@ -350,11 +349,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     return AiBacktestTeacherEngine.runDeepAutoBacktest(candles, symbol, timeframe, aiLanguage).circles;
   }, [propConfirmationCircles, candles, symbol, timeframe, aiLanguage]);
 
-  const displayedConfirmationCircles = useMemo(() => {
-    if (!filterSniperOnly) return effectiveConfirmationCircles;
-    const filtered = effectiveConfirmationCircles.filter((c) => c.isSniperAplus);
-    return filtered.length > 0 ? filtered : effectiveConfirmationCircles;
-  }, [filterSniperOnly, effectiveConfirmationCircles]);
+  const displayedConfirmationCircles = effectiveConfirmationCircles;
 
   // Drawing Tools State
   const [activeTool, setActiveTool] = useState<DrawingToolType>('cursor');
@@ -504,45 +499,53 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   // Mobile Drawing Tools Slideout State
   const [mobileDrawOpen, setMobileDrawOpen] = useState(false);
 
-  // Ultra-Deep Candle Zoom In Function (Inspect micro-wicks & entries)
+  // Ultra-Deep Candle Zoom In Function (Inspect micro-wicks & entries in high-definition)
   const handleZoomIn = useCallback(() => {
     if (!chartRef.current) return;
     const timeScale = chartRef.current.timeScale();
+    const currentBarSpacing = timeScale.options().barSpacing || 10;
+    // Generously boost barSpacing up to 450px so candles can become massive and crystal clear
+    const newBarSpacing = Math.min(450, Math.round(currentBarSpacing * 1.55 + 2));
+    timeScale.applyOptions({ barSpacing: newBarSpacing });
+
     const currentRange = timeScale.getVisibleLogicalRange();
     if (currentRange) {
       const barsCount = currentRange.to - currentRange.from;
-      const reduction = Math.max(1, barsCount * 0.32);
-      if (barsCount - reduction >= 3) {
+      const reduction = Math.max(2, barsCount * 0.35);
+      if (barsCount - reduction >= 2) {
         timeScale.setVisibleLogicalRange({
-          from: currentRange.from + reduction / 2,
-          to: currentRange.to - reduction / 2,
+          from: currentRange.from + reduction * 0.45,
+          to: currentRange.to - reduction * 0.55,
         });
-      } else {
-        timeScale.applyOptions({ barSpacing: Math.min(240, (timeScale.options().barSpacing || 12) * 1.35) });
       }
-      syncPriceLineCoordinates();
     }
+    syncPriceLineCoordinates();
   }, [syncPriceLineCoordinates]);
 
   // Macro Zoom Out Function (View larger trend context)
   const handleZoomOut = useCallback(() => {
     if (!chartRef.current) return;
     const timeScale = chartRef.current.timeScale();
+    const currentBarSpacing = timeScale.options().barSpacing || 10;
+    const newBarSpacing = Math.max(0.8, Math.round(currentBarSpacing / 1.55));
+    timeScale.applyOptions({ barSpacing: newBarSpacing });
+
     const currentRange = timeScale.getVisibleLogicalRange();
     if (currentRange) {
       const barsCount = currentRange.to - currentRange.from;
-      const expansion = Math.max(4, barsCount * 0.38);
+      const expansion = Math.max(6, barsCount * 0.45);
       timeScale.setVisibleLogicalRange({
         from: currentRange.from - expansion / 2,
         to: currentRange.to + expansion / 2,
       });
-      syncPriceLineCoordinates();
     }
+    syncPriceLineCoordinates();
   }, [syncPriceLineCoordinates]);
 
   // Reset / Fit Content Zoom Function
   const handleResetZoom = useCallback(() => {
     if (!chartRef.current) return;
+    chartRef.current.timeScale().applyOptions({ barSpacing: 12 });
     chartRef.current.timeScale().fitContent();
     chartRef.current.priceScale('right').applyOptions({ autoScale: true });
     syncPriceLineCoordinates();
@@ -593,8 +596,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         secondsVisible: false,
         rightOffset: 12,
         barSpacing: 10,
-        minBarSpacing: 0.5,
-        maxBarSpacing: 250,
+        minBarSpacing: 0.2,
+        maxBarSpacing: 500,
       },
       rightPriceScale: {
         borderColor: '#2A2E39',
@@ -1480,21 +1483,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               <span>{showPerfectEntrySymbols ? '🎯 Entry Symbol: ON' : '🎯 Entry Symbol: OFF'}</span>
             </button>
 
-            {/* 99% A+ Sniper Setup Filter Button */}
-            <button
-              type="button"
-              onClick={() => setFilterSniperOnly((v) => !v)}
-              className={`pointer-events-auto px-2.5 py-1 rounded-md text-xs font-bold flex items-center gap-1.5 border shadow-lg transition-all cursor-pointer shrink-0 ${
-                filterSniperOnly
-                  ? 'bg-amber-400 border-amber-300 text-black shadow-amber-400/40'
-                  : 'bg-[#1E222D]/95 hover:bg-[#2A2E39] border-[#2A2E39] text-amber-400'
-              }`}
-              title="Filter strictly to 99% A+ Institutional Sniper setups (filters out all low-probability noise)"
-            >
-              <span>💎</span>
-              <span>{filterSniperOnly ? '99% A+ Only: ON' : '💎 99% A+'}</span>
-            </button>
-
             {/* Toggle Confirmation Circles (High Probability Markers) */}
             <button
               type="button"
@@ -1576,98 +1564,55 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               ))}
           </div>
 
-          {/* DOCKED BOTTOM-LEFT EXECUTION & CLEAN OHLC STATUS (NEVER OVERLAPS TOP FUNCTION BUTTONS) */}
-          <div className="absolute bottom-3 left-3 z-20 flex flex-col gap-1.5 pointer-events-none select-none">
-            {/* Discreet Mini OHLC Status Bar */}
-            <div className="pointer-events-auto flex items-center gap-2 text-[10px] font-mono text-[#94A3B8] bg-[#131722]/90 border border-[#2A2E39] px-2.5 py-1 rounded shadow-lg backdrop-blur-md">
-              <span className="font-bold text-white">{symbol}</span>
-              <span>O: {currentCandle?.open.toFixed(decimals) || '0.00'}</span>
-              <span>H: {currentCandle?.high.toFixed(decimals) || '0.00'}</span>
-              <span>L: {currentCandle?.low.toFixed(decimals) || '0.00'}</span>
-              <span className="font-bold text-[#00E676]">C: {currentClose.toFixed(decimals)}</span>
-            </div>
-
-            {/* Quick Instant Buy / Sell & Order Controls */}
-            <div className="pointer-events-auto flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => onStartDraftOrder('SHORT')}
-                className="px-3 py-1.5 rounded-md bg-[#F23645] hover:bg-[#D92B3A] text-white flex flex-col items-start leading-tight transition-all cursor-pointer shadow-lg shadow-[#F23645]/25 active:scale-95"
-              >
-                <span className="text-[10px] font-extrabold uppercase tracking-wider">SELL</span>
-                <span className="text-xs font-extrabold font-mono">{bidPrice.toFixed(decimals)}</span>
-              </button>
-
-              <div className="px-2 py-1 bg-[#1E222D]/95 border border-[#2A2E39] rounded-md flex items-center gap-1.5 shadow">
-                <span className="text-[10px] font-mono text-[#94A3B8]">LOT:</span>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0.01"
-                  max="50"
-                  value={lotSize}
-                  onChange={(e) => onChangeLotSize(parseFloat(e.target.value) || 0.1)}
-                  className="w-12 bg-transparent text-xs font-mono font-bold text-white text-center focus:outline-none"
-                />
+          {/* ACTIVE POSITION LIVE STATUS (ONLY WHEN A POSITION IS OPEN, ZERO OBSTRUCTION WHEN FLAT) */}
+          {hasActiveTrade && (
+            <div className="absolute bottom-3 left-3 z-20 flex items-center gap-1.5 pointer-events-auto select-none">
+              <div className="px-3 py-1.5 rounded-md bg-[#1E222D]/95 border border-[#2962FF] flex items-center gap-2 font-mono text-xs shadow-xl backdrop-blur-md">
+                <span
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold text-white ${
+                    tradeDirection === 'LONG' ? 'bg-[#089981]' : 'bg-[#F23645]'
+                  }`}
+                >
+                  {tradeDirection === 'LONG' ? 'BUY' : 'SELL'} {lotSize}
+                </span>
+                <span
+                  className={`font-extrabold text-sm ${
+                    activeTradePnl >= 0 ? 'text-[#00E676]' : 'text-[#F23645]'
+                  }`}
+                >
+                  {activeTradePnl >= 0 ? '+' : ''}${activeTradePnl.toFixed(2)} ({activeTradeR >= 0 ? '+' : ''}
+                  {activeTradeR}R)
+                </span>
+                {onMoveToBreakeven && (
+                  <button
+                    type="button"
+                    onClick={onMoveToBreakeven}
+                    className="px-2 py-0.5 rounded bg-[#2962FF]/25 hover:bg-[#2962FF] text-[#60A5FA] hover:text-white text-[10px] font-bold cursor-pointer"
+                  >
+                    BE
+                  </button>
+                )}
+                {onPartialClose50 && (
+                  <button
+                    type="button"
+                    onClick={onPartialClose50}
+                    className="px-2 py-0.5 rounded bg-[#089981]/25 hover:bg-[#089981] text-[#00E676] hover:text-white text-[10px] font-bold cursor-pointer"
+                  >
+                    50%
+                  </button>
+                )}
+                {onClosePosition && (
+                  <button
+                    type="button"
+                    onClick={onClosePosition}
+                    className="px-2 py-0.5 rounded bg-[#F23645] hover:bg-[#D92B3A] text-white text-[10px] font-bold cursor-pointer"
+                  >
+                    Close
+                  </button>
+                )}
               </div>
-
-              <button
-                type="button"
-                onClick={() => onStartDraftOrder('LONG')}
-                className="px-3 py-1.5 rounded-md bg-[#089981] hover:bg-[#067F6B] text-white flex flex-col items-end leading-tight transition-all cursor-pointer shadow-lg shadow-[#089981]/25 active:scale-95"
-              >
-                <span className="text-[10px] font-extrabold uppercase tracking-wider">BUY</span>
-                <span className="text-xs font-extrabold font-mono">{askPrice.toFixed(decimals)}</span>
-              </button>
-
-              {hasActiveTrade && (
-                <div className="ml-1 px-3 py-1.5 rounded-md bg-[#1E222D]/95 border border-[#2962FF] flex items-center gap-2 font-mono text-xs shadow-xl">
-                  <span
-                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold text-white ${
-                      tradeDirection === 'LONG' ? 'bg-[#089981]' : 'bg-[#F23645]'
-                    }`}
-                  >
-                    {tradeDirection === 'LONG' ? 'BUY' : 'SELL'} {lotSize}
-                  </span>
-                  <span
-                    className={`font-extrabold text-sm ${
-                      activeTradePnl >= 0 ? 'text-[#00E676]' : 'text-[#F23645]'
-                    }`}
-                  >
-                    {activeTradePnl >= 0 ? '+' : ''}${activeTradePnl.toFixed(2)} ({activeTradeR >= 0 ? '+' : ''}
-                    {activeTradeR}R)
-                  </span>
-                  {onMoveToBreakeven && (
-                    <button
-                      type="button"
-                      onClick={onMoveToBreakeven}
-                      className="px-2 py-0.5 rounded bg-[#2962FF]/25 hover:bg-[#2962FF] text-[#60A5FA] hover:text-white text-[10px] font-bold cursor-pointer"
-                    >
-                      BE
-                    </button>
-                  )}
-                  {onPartialClose50 && (
-                    <button
-                      type="button"
-                      onClick={onPartialClose50}
-                      className="px-2 py-0.5 rounded bg-[#089981]/25 hover:bg-[#089981] text-[#00E676] hover:text-white text-[10px] font-bold cursor-pointer"
-                    >
-                      50%
-                    </button>
-                  )}
-                  {onClosePosition && (
-                    <button
-                      type="button"
-                      onClick={onClosePosition}
-                      className="px-2 py-0.5 rounded bg-[#F23645] hover:bg-[#D92B3A] text-white text-[10px] font-bold cursor-pointer"
-                    >
-                      Close
-                    </button>
-                  )}
-                </div>
-              )}
             </div>
-          </div>
+          )}
 
           {/* FLOATING PRO ZOOM & SCALE CONTROLS (DEEP CANDLE ZOOM & MACRO VIEW) */}
           <div className="absolute bottom-20 right-3 z-30 flex flex-col items-center gap-1.5 bg-[#181C27]/95 border border-[#2A2E39] p-1.5 rounded-xl shadow-2xl backdrop-blur-md pointer-events-auto select-none">
@@ -2489,7 +2434,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                             <circle cx={x + 152} cy={entryY - 1} r={3} fill={entryColor} className="animate-ping" />
                           </g>
 
-                          {/* Dedicated Pinpoint Target Crosshair / Compass Symbol Directly at Entry Candle & Price */}
+                          {/* Dedicated Pinpoint Target Crosshair Symbol Directly at Entry Candle & Price */}
                           <g
                             className="pointer-events-auto cursor-pointer group"
                             onClick={(e) => {
@@ -2497,23 +2442,12 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                               setInspectedEntryCircle(circle);
                             }}
                           >
-                            {/* Animated Outer Radar Ring */}
-                            <circle
-                              cx={x}
-                              cy={entryY}
-                              r={16}
-                              fill="none"
-                              stroke={entryColor}
-                              strokeWidth={2}
-                              strokeDasharray="4 3"
-                              className="animate-spin-slow opacity-90"
-                            />
                             {/* Core Disc */}
                             <circle
                               cx={x}
                               cy={entryY}
-                              r={8.5}
-                              fill={isBull ? 'rgba(0, 230, 118, 0.45)' : 'rgba(255, 23, 68, 0.45)'}
+                              r={8}
+                              fill={isBull ? 'rgba(0, 230, 118, 0.4)' : 'rgba(255, 23, 68, 0.4)'}
                               stroke="#FFFFFF"
                               strokeWidth={1.8}
                               className="group-hover:scale-125 transition-transform"
@@ -2592,7 +2526,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                         fontFamily="JetBrains Mono"
                         fontWeight="bold"
                       >
-                        {isAplus ? '💎 99% SNIPER' : `⭕ ${circle.label}`}
+                        {circle.label || (circle.direction === 'BULLISH' ? '🎯 BUY CONFIRM' : '🎯 SELL CONFIRM')}
                       </text>
                     </g>
                   </g>
