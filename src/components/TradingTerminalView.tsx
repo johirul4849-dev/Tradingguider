@@ -50,6 +50,7 @@ import { TradingChart, ChartVisualType, AiAutoMarkOverlay, DraftOrderBracket } f
 import { UserProfileData, SimulatedTradeRecord, DisciplineEventRecord } from '../lib/firebase';
 import { UserSubscriptionRecord } from '../services/subscriptionService';
 import { AiChartTeacherModal } from './AiChartTeacherModal';
+import { UserProfileModal } from './UserProfileModal';
 import {
   AiBacktestTeacherEngine,
   ConfirmationCircle,
@@ -139,6 +140,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
   const [indicators, setIndicators] = useState<IndicatorConfig[]>(DEFAULT_INDICATORS);
   const [showIndicatorModal, setShowIndicatorModal] = useState(false);
   const [indicatorSearch, setIndicatorSearch] = useState('');
+  const [showUserProfileModal, setShowUserProfileModal] = useState(false);
 
   // AI Language Selection (Defaults to Bengali 'bn')
   const [aiLanguage, setAiLanguage] = useState<AiCoachLanguage>('bn');
@@ -450,10 +452,10 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
     let mounted = true;
     MarketDataProvider.fetchThreeMonthHistoryAndLive(symbol, timeframe).then((res) => {
       if (!mounted) return;
-      if (res.candles && res.candles.length >= 100) {
+      if (res.candles && res.candles.length >= 30) {
         pairCandlesCache.current[symbol] = res.candles;
         setAllCandles(res.candles);
-        const startIdx = isReplayMode ? Math.max(100, res.candles.length - 120) : res.candles.length - 1;
+        const startIdx = isReplayMode ? Math.max(30, res.candles.length - 120) : res.candles.length - 1;
         setReplayIndex(startIdx);
         initDefaultBracket(res.candles[startIdx].close, tradeDirection, symbol);
         setDiscoveredSetups(findAiTechniqueSetups(res.candles, symbol, timeframe));
@@ -1288,27 +1290,45 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
             </span>
           </div>
 
-          {!isFullWindowChart &&
-            (isDemoSandbox && onGoogleLogin ? (
-              <button
-                type="button"
-                onClick={onGoogleLogin}
-                className="px-2 py-1 rounded bg-[#1E222D] hover:bg-[#2A2E39] border border-[#2A2E39] text-[11px] font-semibold text-white cursor-pointer"
-              >
-                Save
-              </button>
-            ) : (
-              onSignOut && (
-                <button
-                  type="button"
-                  onClick={onSignOut}
-                  title="Sign Out"
-                  className="p-1 rounded bg-[#1E222D] hover:bg-[#2A2E39] text-[#94A3B8] hover:text-white cursor-pointer"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                </button>
-              )
-            ))}
+          {/* User Profile & Account Settings Button */}
+          <button
+            type="button"
+            onClick={() => setShowUserProfileModal(true)}
+            className="px-2.5 py-1.5 rounded-lg bg-[#1E222D] hover:bg-[#2A2E39] border border-[#2A2E39] hover:border-[#00E5FF]/40 text-xs font-medium text-white flex items-center gap-1.5 transition-all cursor-pointer shadow-sm"
+            title="User Profile & Account Settings"
+          >
+            <div className="w-5 h-5 rounded-full bg-gradient-to-tr from-[#2962FF] to-[#00E5FF] flex items-center justify-center text-[10px] font-bold text-white font-mono shadow">
+              {profile.displayName ? profile.displayName.charAt(0).toUpperCase() : 'U'}
+            </div>
+            <span className="hidden sm:inline font-mono text-[11px] max-w-[110px] truncate text-slate-200">
+              {profile.displayName || profile.email?.split('@')[0] || 'Profile'}
+            </span>
+          </button>
+
+          {/* Connect Google button if in sandbox */}
+          {isDemoSandbox && onGoogleLogin && (
+            <button
+              type="button"
+              onClick={onGoogleLogin}
+              className="px-2.5 py-1.5 rounded-lg bg-[#2962FF]/20 hover:bg-[#2962FF]/40 border border-[#2962FF]/40 text-[11px] font-semibold text-[#60A5FA] hover:text-white cursor-pointer transition-colors"
+            >
+              Sync Google
+            </button>
+          )}
+
+          {/* HIGH-VISIBILITY, UNMISSABLE "LOG OUT OF ACCOUNT" BUTTON */}
+          {onSignOut && (
+            <button
+              type="button"
+              onClick={onSignOut}
+              title="Log Out of Account / Exit to Homepage"
+              className="px-3 py-1.5 rounded-lg bg-rose-600/20 hover:bg-rose-600 border border-rose-500/50 hover:border-rose-600 text-rose-300 hover:text-white text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md"
+            >
+              <LogOut className="w-3.5 h-3.5 text-rose-400 group-hover:text-white" />
+              <span className="hidden sm:inline">Log Out Account</span>
+              <span className="sm:hidden">Log Out</span>
+            </button>
+          )}
         </div>
       </header>
 
@@ -1981,6 +2001,17 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
           >
             Reset $10k
           </button>
+          {onSignOut && (
+            <button
+              type="button"
+              onClick={onSignOut}
+              className="text-rose-400 hover:text-rose-300 font-bold flex items-center gap-1 cursor-pointer ml-1"
+              title="Log Out of Account"
+            >
+              <LogOut className="w-3 h-3" />
+              <span>Log Out</span>
+            </button>
+          )}
         </div>
       </footer>
 
@@ -2092,6 +2123,17 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
             <Zap className="w-3 h-3 fill-current" />
             <span>Order</span>
           </button>
+
+          {onSignOut && (
+            <button
+              type="button"
+              onClick={onSignOut}
+              className="p-1.5 rounded bg-rose-600/20 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/40"
+              title="Log Out of Account"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </div>
 
@@ -2410,6 +2452,21 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
           showToast(`🎯 99% Sniper Setup loaded: ${setup.direction} @ ${setup.entry} (Safe SL: ${setup.sl})`, 'emerald');
         }}
         language={aiLanguage}
+      />
+
+      {/* User Profile & Account Settings Modal with Logout */}
+      <UserProfileModal
+        isOpen={showUserProfileModal}
+        onClose={() => setShowUserProfileModal(false)}
+        profile={profile}
+        userSubscription={userSubscription}
+        onSignOut={onSignOut || (() => {})}
+        onOpenSubscriptionModal={onOpenSubscriptionModal}
+        onUpdatePreferences={(updates) => {
+          if (updates.preferredMarket) {
+            handleSelectSymbol(updates.preferredMarket as SupportedSymbol);
+          }
+        }}
       />
     </div>
   );

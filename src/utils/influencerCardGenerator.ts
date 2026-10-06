@@ -45,7 +45,7 @@ export function generateAndDownloadInfluencerJpg(influencer: InfluencerRecord): 
   // Brand Name
   ctx.fillStyle = '#FFFFFF';
   ctx.font = 'bold 44px sans-serif';
-  ctx.fillText('TRADEPILOT PRO', 60, 160);
+  ctx.fillText('TRADINGGUIDER PRO', 60, 160);
 
   ctx.fillStyle = '#94A3B8';
   ctx.font = '18px sans-serif';
@@ -151,7 +151,7 @@ export function generateAndDownloadInfluencerJpg(influencer: InfluencerRecord): 
   // Trigger JPG Download
   const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
   const link = document.createElement('a');
-  link.download = `tradepilot_influencer_${influencer.couponCode}.jpg`;
+  link.download = `tradingguider_influencer_${influencer.couponCode}.jpg`;
   link.href = dataUrl;
   document.body.appendChild(link);
   link.click();

@@ -281,6 +281,7 @@ export default function App() {
         onGoogleLogin={handleGoogleLogin}
         isSigningIn={isSigningIn}
         authError={authError}
+        onEnterDemoSandbox={handleEnterDemoSandbox}
       />
     );
   }

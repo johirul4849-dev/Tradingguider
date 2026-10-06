@@ -125,7 +125,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
           </div>
           <div>
             <h2 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
-              TradePilot Pro Subscription
+              Tradingguider Pro Subscription
             </h2>
             <p className="text-xs text-[#94A3B8]">
               Unrestricted 90-Day Backtest History, Sub-Second Live Feed & AI SMC Markings

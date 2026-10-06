@@ -152,7 +152,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({ isOpen, onClos
             <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-[#F0B90B]/10 border border-[#F0B90B]/40 flex items-center justify-center text-[#F0B90B] shadow-lg">
               <Shield className="w-7 h-7" />
             </div>
-            <h3 className="text-xl font-bold text-white mb-2">TradePilot Smart Admin Console</h3>
+            <h3 className="text-xl font-bold text-white mb-2">Tradingguider Smart Admin Console</h3>
             <p className="text-xs text-[#94A3B8] mb-6">
               Enter the authorized access code to manage subscriptions, Binance finance, and influencer
               payouts.

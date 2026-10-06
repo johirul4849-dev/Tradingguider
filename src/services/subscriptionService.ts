@@ -44,7 +44,7 @@ export const SUBSCRIPTION_PACKAGES: Record<string, SubscriptionPackage> = {
 
 export const BINANCE_PAYMENT_CONFIG = {
   payId: '794380283',
-  recipientName: 'TradePilot Pro',
+  recipientName: 'Tradingguider Pro',
   acceptedCurrencies: 'USDT (TRC20 / BEP20) or Binance Pay ID',
   adminPasscode: 'Jahid5359',
   minWithdrawal: 20, // USD

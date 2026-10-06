@@ -11,12 +11,12 @@ export interface MarketSymbolConfig {
 }
 
 export const BRAND_CONFIG = {
-  name: 'TradePilot AI',
-  tagline: 'Practice the Market. Master the Process.',
+  name: 'Tradingguider',
+  tagline: 'Master Price Action with Institutional Precision',
   shortDescription:
-    'Train like a professional trader through realistic historical chart replay, disciplined risk management, and structured AI trade coaching.',
+    'Train like an institutional trader through 90 days of original BTC/USD & Gold chart replay, Exness drag mechanics, and AI trade mentorship.',
   legalDisclaimer:
-    'TradePilot AI is an educational and simulated trading platform. Market analysis and AI-generated scenarios are for educational purposes only and are not guaranteed predictions or personalized financial advice. Historical simulation results do not guarantee future results. Trading financial markets involves substantial risk.',
+    'Tradingguider is an educational and simulated trading platform. Market analysis and AI-generated scenarios are for educational purposes only and are not financial advice. Historical simulation results do not guarantee future results. Trading financial markets involves substantial risk.',
   learningLoop: ['LEARN', 'ANALYZE', 'DECIDE', 'SIMULATE', 'REVIEW', 'CORRECT', 'REPEAT'] as const,
   markets: {
     'BTC/USD': {

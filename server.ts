@@ -373,146 +373,69 @@ app.get('/api/market/history', async (req, res) => {
   };
   const binanceInterval = intervalMap[timeframe] || '1h';
 
-  // 1. If XAU/USD (Gold), fetch real COMEX Gold candles if available
-  if (symbol === 'XAU/USD') {
-    try {
-      const yahooRangeMap: Record<string, string> = {
-        '1m': '1d',
-        '5m': '5d',
-        '15m': '5d',
-        '30m': '1mo',
-        '1H': '1mo',
-        '4H': '3mo',
-        '1D': '1y',
-      };
-      const range = yahooRangeMap[timeframe] || '5d';
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 4000);
-      const r = await fetch(
-        `https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=${encodeURIComponent(
-          timeframe.toLowerCase() === '1h' ? '60m' : timeframe.toLowerCase()
-        )}&range=${range}`,
-        {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-          signal: controller.signal,
-        }
-      );
-      clearTimeout(timeout);
-      if (r.ok) {
-        const d: any = await r.json();
-        const resObj = d?.chart?.result?.[0];
-        const timestamps = resObj?.timestamp;
-        const quote = resObj?.indicators?.quote?.[0];
-        if (Array.isArray(timestamps) && timestamps.length > 20 && quote) {
-          const candles = [];
-          for (let i = 0; i < timestamps.length; i++) {
-            const o = quote.open?.[i];
-            const h = quote.high?.[i];
-            const l = quote.low?.[i];
-            const c = quote.close?.[i];
-            const v = quote.volume?.[i] || 50;
-            if (o != null && h != null && l != null && c != null) {
-              candles.push({
-                time: Number(timestamps[i]),
-                open: Number(Number(o).toFixed(2)),
-                high: Number(Number(h).toFixed(2)),
-                low: Number(Number(l).toFixed(2)),
-                close: Number(Number(c).toFixed(2)),
-                volume: Number(v),
-              });
-            }
-          }
-          if (candles.length > 20) {
-            const last = candles[candles.length - 1];
-            const prev24 = candles[Math.max(0, candles.length - 25)] || candles[0];
-            const changePct = prev24?.close
-              ? Number((((last.close - prev24.close) / prev24.close) * 100).toFixed(2))
-              : 0;
+  // 1. Fetch Binance Vision or Binance standard candles for BTCUSDT or PAXGUSDT for Gold
+  const binancePair = symbol === 'XAU/USD' ? 'PAXGUSDT' : 'BTCUSDT';
+  const binanceUrls = [
+    `https://data-api.binance.vision/api/v3/klines?symbol=${binancePair}&interval=${binanceInterval}&limit=1000`,
+    `https://api.binance.com/api/v3/klines?symbol=${binancePair}&interval=${binanceInterval}&limit=1000`,
+  ];
 
-            const payload = {
-              symbol,
-              timeframe,
-              price: last.close,
-              changePercent: changePct,
-              high24h: Math.max(...candles.slice(-24).map((c) => c.high)),
-              low24h: Math.min(...candles.slice(-24).map((c) => c.low)),
-              isLive: true,
-              source: 'COMEX GOLD (GC=F) REAL LIVE BENCHMARK',
-              candles,
-            };
-            historyCache.set(cacheKey, { timestamp: Date.now(), payload });
-            return res.json(payload);
+  for (const bUrl of binanceUrls) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3500);
+      const bRes = await fetch(bUrl, { signal: controller.signal });
+      clearTimeout(timeout);
+
+      if (bRes.ok) {
+        const rawBatch: any[] = await bRes.json();
+        if (Array.isArray(rawBatch) && rawBatch.length > 20) {
+          const candles = rawBatch.map((k) => ({
+            time: Math.floor(Number(k[0]) / 1000),
+            open: Number(Number(k[1]).toFixed(2)),
+            high: Number(Number(k[2]).toFixed(2)),
+            low: Number(Number(k[3]).toFixed(2)),
+            close: Number(Number(k[4]).toFixed(2)),
+            volume: Number(k[5]),
+          }));
+
+          // If Gold, sync last candle with live gold spot
+          if (symbol === 'XAU/USD') {
+            try {
+              const gRes = await fetch('https://api.gold-api.com/price/XAU');
+              if (gRes.ok) {
+                const gData = await gRes.json();
+                if (gData && gData.price > 0) {
+                  candles[candles.length - 1].close = gData.price;
+                }
+              }
+            } catch (_e) {}
           }
+
+          const last = candles[candles.length - 1];
+          const prev24 = candles[Math.max(0, candles.length - 25)] || candles[0];
+          const changePct = prev24?.close
+            ? Number((((last.close - prev24.close) / prev24.close) * 100).toFixed(2))
+            : 0;
+
+          const payload = {
+            symbol,
+            timeframe,
+            price: last.close,
+            changePercent: changePct,
+            high24h: Math.max(...candles.slice(-24).map((c) => c.high)),
+            low24h: Math.min(...candles.slice(-24).map((c) => c.low)),
+            isLive: true,
+            source: symbol === 'XAU/USD' ? 'BINANCE VISION PHYSICAL GOLD (1:1 SPOT)' : 'BINANCE VISION BTC/USD',
+            candles,
+          };
+          historyCache.set(cacheKey, { timestamp: Date.now(), payload });
+          return res.json(payload);
         }
       }
     } catch (_err) {
-      // fallback to Binance PAXGUSDT
+      // try next endpoint
     }
-  }
-
-  // 2. Fetch Binance candles for BTCUSDT or fallback PAXGUSDT for Gold
-  const binancePair = symbol === 'XAU/USD' ? 'PAXGUSDT' : 'BTCUSDT';
-
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4500);
-
-    const batch2Res = await fetch(
-      `https://api.binance.com/api/v3/klines?symbol=${binancePair}&interval=${binanceInterval}&limit=1000`,
-      { signal: controller.signal }
-    );
-    clearTimeout(timeout);
-
-    if (batch2Res.ok) {
-      const rawBatch2: any[] = await batch2Res.json();
-      let combinedRaw = rawBatch2;
-
-      if (rawBatch2.length > 0) {
-        const earliestOpenTime = Number(rawBatch2[0][0]) - 1;
-        try {
-          const batch1Res = await fetch(
-            `https://api.binance.com/api/v3/klines?symbol=${binancePair}&interval=${binanceInterval}&endTime=${earliestOpenTime}&limit=1000`
-          );
-          if (batch1Res.ok) {
-            const rawBatch1: any[] = await batch1Res.json();
-            combinedRaw = [...rawBatch1, ...rawBatch2];
-          }
-        } catch (_e) {
-          // Use batch2 if batch1 times out
-        }
-      }
-
-      const candles = combinedRaw.map((k) => ({
-        time: Math.floor(Number(k[0]) / 1000),
-        open: Number(Number(k[1]).toFixed(2)),
-        high: Number(Number(k[2]).toFixed(2)),
-        low: Number(Number(k[3]).toFixed(2)),
-        close: Number(Number(k[4]).toFixed(2)),
-        volume: Number(k[5]),
-      }));
-
-      const last = candles[candles.length - 1];
-      const prev24 = candles[Math.max(0, candles.length - 25)] || candles[0];
-      const changePct = prev24?.close
-        ? Number((((last.close - prev24.close) / prev24.close) * 100).toFixed(2))
-        : 0;
-
-      const payload = {
-        symbol,
-        timeframe,
-        price: last.close,
-        changePercent: changePct,
-        high24h: Math.max(...candles.slice(-24).map((c) => c.high)),
-        low24h: Math.min(...candles.slice(-24).map((c) => c.low)),
-        isLive: true,
-        source: symbol === 'XAU/USD' ? 'REAL GOLD SPOT FEED' : 'BINANCE REALTIME FEED',
-        candles,
-      };
-      historyCache.set(cacheKey, { timestamp: Date.now(), payload });
-      return res.json(payload);
-    }
-  } catch (_err) {
-    // Fallback handled on client if external network is restricted
   }
 
   return res.json({
