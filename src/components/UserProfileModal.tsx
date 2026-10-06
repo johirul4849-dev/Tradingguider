@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   User,
   Mail,
@@ -18,9 +18,14 @@ import {
   X,
   CreditCard,
   Zap,
+  Hourglass,
 } from 'lucide-react';
 import { UserProfileData } from '../lib/firebase';
-import { UserSubscriptionRecord } from '../services/subscriptionService';
+import {
+  UserSubscriptionRecord,
+  SUBSCRIPTION_PACKAGES,
+  calculateRemainingCountdown,
+} from '../services/subscriptionService';
 import { BRAND_CONFIG, SupportedSymbol, SupportedTimeframe } from '../config/brand';
 
 interface UserProfileModalProps {
@@ -48,6 +53,16 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     (profile.preferredMarket as SupportedSymbol) || 'BTC/USD'
   );
   const [riskPref, setRiskPref] = useState<number>(profile.riskPreference || 1.0);
+  const [currentTime, setCurrentTime] = useState<number>(Date.now());
+
+  // Live countdown ticker every 1 second
+  useEffect(() => {
+    if (!isOpen) return;
+    const timer = setInterval(() => {
+      setCurrentTime(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -158,66 +173,109 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           </div>
 
           {/* Subscription & Pass Card */}
-          <div className="p-4 rounded-xl bg-gradient-to-r from-[#141D35] via-[#16223F] to-[#141D35] border border-blue-500/30 shadow-md">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-[#FFD700]" />
-                <span className="text-xs font-mono font-bold uppercase tracking-wider text-slate-300">
-                  Membership & Pass Tier
-                </span>
-              </div>
-              <span
-                className={`text-[11px] font-mono font-bold px-2.5 py-0.5 rounded-full border ${
-                  isSubscribed
-                    ? 'bg-emerald-500/20 text-[#00E676] border-emerald-500/40'
-                    : isTrial
-                    ? 'bg-blue-500/20 text-blue-300 border-blue-500/40'
-                    : isPending
-                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                    : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-                }`}
-              >
-                {isSubscribed
-                  ? 'PRO SUBSCRIBED'
-                  : isTrial
-                  ? '24H FREE TRIAL'
-                  : isPending
-                  ? 'PENDING VERIFICATION'
-                  : 'TRIAL EXPIRED'}
-              </span>
-            </div>
+          {(() => {
+            const expiresAt = isSubscribed
+              ? userSubscription?.subscriptionExpiresAt
+              : isTrial
+              ? userSubscription?.freeTrialExpiresAt
+              : isPending && userSubscription?.freeTrialExpiresAt
+              ? userSubscription?.freeTrialExpiresAt
+              : userSubscription?.freeTrialExpiresAt || 0;
+            const startedAt = isSubscribed
+              ? userSubscription?.lastPaymentSubmission?.submittedAt || userSubscription?.firstLoginAt
+              : userSubscription?.firstLoginAt;
+            const countdown = calculateRemainingCountdown(expiresAt, startedAt, currentTime);
 
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
-              <div>
-                <p className="text-slate-200 font-medium">
-                  {isSubscribed
-                    ? 'Full 90-Day Bar Replay, SMC Auto-Mark & AI Mentorship Unlocked'
-                    : isTrial
-                    ? 'Your 24-hour complimentary trial is currently active.'
-                    : 'Upgrade to a 1, 6, or 12 month pass to continue testing.'}
-                </p>
-                {userSubscription?.freeTrialExpiresAt && isTrial && (
-                  <p className="text-slate-400 text-[11px] mt-1 font-mono flex items-center gap-1">
-                    <Clock className="w-3 h-3 text-blue-400" />
-                    Trial ends: {new Date(userSubscription.freeTrialExpiresAt).toLocaleString()}
-                  </p>
-                )}
-              </div>
+            return (
+              <div className="p-4 rounded-xl bg-gradient-to-r from-[#141D35] via-[#16223F] to-[#141D35] border border-blue-500/30 shadow-md">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-[#FFD700]" />
+                    <span className="text-xs font-mono font-bold uppercase tracking-wider text-slate-300">
+                      Membership & Pass Tier
+                    </span>
+                  </div>
+                  <span
+                    className={`text-[11px] font-mono font-bold px-2.5 py-0.5 rounded-full border ${
+                      isSubscribed
+                        ? 'bg-emerald-500/20 text-[#00E676] border-emerald-500/40'
+                        : isTrial
+                        ? 'bg-blue-500/20 text-blue-300 border-blue-500/40'
+                        : isPending
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                        : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                    }`}
+                  >
+                    {isSubscribed
+                      ? 'PRO SUBSCRIBED'
+                      : isTrial
+                      ? '24H FREE TRIAL'
+                      : isPending
+                      ? 'PENDING VERIFICATION'
+                      : 'TRIAL EXPIRED'}
+                  </span>
+                </div>
 
-              {onOpenSubscriptionModal && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onClose();
-                    onOpenSubscriptionModal();
-                  }}
-                  className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#2962FF] to-[#00E5FF] hover:opacity-95 text-white font-bold text-xs shadow-md transition-all cursor-pointer whitespace-nowrap"
-                >
-                  {isSubscribed ? 'Manage Pass' : 'Upgrade Pass ($8)'}
-                </button>
-              )}
-            </div>
-          </div>
+                {/* Live Auto Countdown Display Box */}
+                <div className="mb-3 p-3 rounded-lg bg-[#0C1428] border border-slate-700/80">
+                  <div className="flex items-center justify-between text-xs mb-1">
+                    <span className="text-slate-400 font-mono flex items-center gap-1.5">
+                      <Hourglass className={`w-3.5 h-3.5 ${countdown.isExpired ? 'text-rose-400' : 'text-[#00E5FF] animate-pulse'}`} />
+                      <span>Remaining Access Time:</span>
+                    </span>
+                    <span className={`font-mono text-xs font-bold ${countdown.isExpired ? 'text-rose-400' : 'text-[#00E676]'}`}>
+                      {countdown.isExpired ? 'TIME EXPIRED' : countdown.compactClock}
+                    </span>
+                  </div>
+
+                  <div className={`text-xs font-mono font-bold ${countdown.isExpired ? 'text-rose-400' : 'text-[#00E5FF]'}`}>
+                    {countdown.formattedString}
+                  </div>
+
+                  {/* Progress bar */}
+                  <div className="w-full bg-slate-800 h-1.5 rounded-full mt-2 overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-500 rounded-full ${
+                        countdown.isExpired
+                          ? 'bg-rose-500 w-0'
+                          : countdown.progressPercent > 50
+                          ? 'bg-[#00E676]'
+                          : countdown.progressPercent > 20
+                          ? 'bg-amber-400'
+                          : 'bg-rose-400'
+                      }`}
+                      style={{ width: `${countdown.isExpired ? 0 : countdown.progressPercent}%` }}
+                    />
+                  </div>
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+                  <div>
+                    <p className="text-slate-200 font-medium">
+                      {isSubscribed
+                        ? 'Full 90-Day Bar Replay, SMC Auto-Mark & AI Mentorship Unlocked'
+                        : isTrial
+                        ? 'Your 24-hour complimentary trial is currently active.'
+                        : 'Your trial or package has expired. Upgrade to continue practicing.'}
+                    </p>
+                  </div>
+
+                  {onOpenSubscriptionModal && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        onOpenSubscriptionModal();
+                      }}
+                      className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#2962FF] to-[#00E5FF] hover:opacity-95 text-white font-bold text-xs shadow-md transition-all cursor-pointer whitespace-nowrap"
+                    >
+                      {isSubscribed ? 'Manage Plan' : 'Purchase Package ($8)'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Account Balance & Discipline Overview */}
           <div className="grid grid-cols-2 gap-4">

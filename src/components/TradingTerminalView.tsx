@@ -29,6 +29,7 @@ import {
   Radio,
   RefreshCw,
   BookOpen,
+  Lock,
 } from 'lucide-react';
 import { SupportedSymbol, SupportedTimeframe, BRAND_CONFIG } from '../config/brand';
 import {
@@ -48,7 +49,11 @@ import {
 import { liveMarketStreamer, LiveStreamStatus, LiveMarketTick } from '../services/liveMarketStreamer';
 import { TradingChart, ChartVisualType, AiAutoMarkOverlay, DraftOrderBracket } from './TradingChart';
 import { UserProfileData, SimulatedTradeRecord, DisciplineEventRecord } from '../lib/firebase';
-import { UserSubscriptionRecord } from '../services/subscriptionService';
+import {
+  UserSubscriptionRecord,
+  SUBSCRIPTION_PACKAGES,
+  calculateRemainingCountdown,
+} from '../services/subscriptionService';
 import { AiChartTeacherModal } from './AiChartTeacherModal';
 import { UserProfileModal } from './UserProfileModal';
 import {
@@ -144,6 +149,13 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
 
   // AI Language Selection (Defaults to Bengali 'bn')
   const [aiLanguage, setAiLanguage] = useState<AiCoachLanguage>('bn');
+
+  // Real-time ticking clock for header subscription countdown
+  const [termCurrentTime, setTermCurrentTime] = useState<number>(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setTermCurrentTime(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   // Full-Window / Fullscreen Chart State
   const [isFullWindowChart, setIsFullWindowChart] = useState<boolean>(false);
@@ -1263,25 +1275,49 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
             <span>Exness Order Ticket</span>
           </button>
 
-          {/* Subscription / 24-Hour Free Trial Status Button */}
-          {onOpenSubscriptionModal && (
-            <button
-              type="button"
-              onClick={onOpenSubscriptionModal}
-              className="px-2.5 py-1 rounded text-xs font-bold font-mono flex items-center gap-1.5 border transition-all cursor-pointer bg-[#2962FF]/15 hover:bg-[#2962FF]/30 border-[#2962FF]/50 text-[#38BDF8]"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-[#FFB300]" />
-              <span>
-                {userSubscription?.status === 'ACTIVE_SUBSCRIBED'
-                  ? '★ Pro Active'
-                  : userSubscription?.status === 'PENDING_APPROVAL'
-                  ? '⏳ Pending Admin'
-                  : userSubscription?.status === 'TRIAL_ACTIVE'
-                  ? '⏳ 24h Trial'
-                  : 'Upgrade Pro ($8)'}
-              </span>
-            </button>
-          )}
+          {/* Subscription / 24-Hour Free Trial Status Button with Live Countdown */}
+          {onOpenSubscriptionModal && (() => {
+            const isSubscribed = userSubscription?.status === 'ACTIVE_SUBSCRIBED';
+            const isTrial = userSubscription?.status === 'TRIAL_ACTIVE';
+            const isPending = userSubscription?.status === 'PENDING_APPROVAL';
+            const isExpired = userSubscription?.status === 'TRIAL_EXPIRED';
+            const expiresAt = isSubscribed
+              ? userSubscription?.subscriptionExpiresAt
+              : isTrial
+              ? userSubscription?.freeTrialExpiresAt
+              : isPending && userSubscription?.freeTrialExpiresAt
+              ? userSubscription?.freeTrialExpiresAt
+              : 0;
+            const cd = calculateRemainingCountdown(expiresAt, userSubscription?.firstLoginAt, termCurrentTime);
+
+            let label = 'Upgrade Pro ($8)';
+            let badgeStyle = 'bg-[#2962FF]/15 hover:bg-[#2962FF]/30 border-[#2962FF]/50 text-[#38BDF8]';
+            if (isSubscribed) {
+              label = `★ Pro: ${cd.shortString} left`;
+              badgeStyle = 'bg-blue-500/20 hover:bg-blue-500/30 border-blue-500/50 text-[#00E5FF]';
+            } else if (isTrial) {
+              label = `⏳ Trial: ${cd.shortString} left`;
+              badgeStyle = 'bg-emerald-500/20 hover:bg-emerald-500/30 border-emerald-500/50 text-[#00E676]';
+            } else if (isPending) {
+              label = '⏳ Pending Admin';
+              badgeStyle = 'bg-amber-500/20 hover:bg-amber-500/30 border-amber-500/50 text-[#F59E0B]';
+            } else if (isExpired) {
+              label = '🔴 Expired - Buy Package';
+              badgeStyle = 'bg-rose-500/25 hover:bg-rose-500/40 border-rose-500/60 text-rose-300 animate-pulse';
+            }
+
+            return (
+              <button
+                type="button"
+                onClick={onOpenSubscriptionModal}
+                className={`px-2.5 py-1 rounded text-xs font-bold font-mono flex items-center gap-1.5 border transition-all cursor-pointer shadow-sm ${badgeStyle}`}
+                title="Manage Subscription & Access Countdown"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-[#FFB300]" />
+                <span>{label}</span>
+              </button>
+            );
+          })()}
 
           <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#1E222D] border border-[#2A2E39] text-xs font-mono">
             <span className="text-[#787B86]">Equity:</span>
@@ -1334,6 +1370,60 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
 
       {/* 2. UNIFIED REAL CHART WORKSPACE */}
       <div className="flex-1 flex min-h-0 overflow-hidden relative">
+        {/* Automatic Package Purchase Locked Barrier if 24h trial or package ended */}
+        {userSubscription?.status === 'TRIAL_EXPIRED' && (
+          <div className="absolute inset-0 z-40 bg-[#0A1022]/85 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="max-w-md w-full bg-[#131722] border-2 border-rose-500/60 rounded-2xl p-6 sm:p-8 shadow-2xl text-center space-y-4">
+              <div className="w-14 h-14 rounded-2xl bg-rose-500/20 border border-rose-500/40 text-rose-400 flex items-center justify-center mx-auto shadow-lg">
+                <Lock className="w-7 h-7" />
+              </div>
+              <div>
+                <h3 className="text-xl font-black text-white font-display">
+                  24-Hour Free Access Ended
+                </h3>
+                <p className="text-xs text-slate-300 mt-2 leading-relaxed">
+                  Your 24 hours of free trading practice have expired.
+                  To continue practicing with live charts, bar replay, and AI SMC mentorship, please activate a subscription package below.
+                </p>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-[#0C1222] border border-slate-700 text-left space-y-1.5 text-xs">
+                <div className="flex justify-between text-slate-300 font-medium">
+                  <span>1 Month Pro Pass:</span>
+                  <span className="font-mono text-[#00E676] font-bold">$7 / $8 USDT</span>
+                </div>
+                <div className="flex justify-between text-slate-300 font-medium">
+                  <span>6 Months Mastery (Popular):</span>
+                  <span className="font-mono text-[#00E676] font-bold">$35 / $40 USDT</span>
+                </div>
+                <div className="flex justify-between text-slate-300 font-medium">
+                  <span>12 Months Elite Trader:</span>
+                  <span className="font-mono text-[#00E676] font-bold">$62 / $70 USDT</span>
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={onOpenSubscriptionModal}
+                  className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#2962FF] to-[#00E5FF] text-white font-black text-xs uppercase tracking-wider shadow-lg hover:opacity-95 transition-all cursor-pointer"
+                >
+                  Purchase Package to Continue Practice
+                </button>
+                {onSignOut && (
+                  <button
+                    type="button"
+                    onClick={onSignOut}
+                    className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition-colors cursor-pointer"
+                  >
+                    Log Out of Account
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="flex-1 flex flex-col min-w-0 h-full relative">
           <div className="flex-1 relative min-h-0">
             <TradingChart

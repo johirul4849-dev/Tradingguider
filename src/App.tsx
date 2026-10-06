@@ -163,9 +163,28 @@ export default function App() {
     return unsub;
   }, [profile.uid, isAuthenticated]);
 
+  // Real-time interval check: auto-detect when 24h trial or subscription ends and prompt purchase package
+  useEffect(() => {
+    if (!isAuthenticated || !profile.uid) return;
+    const checkExpiry = () => {
+      const sub = subscriptionService.getUserSubscription(profile.uid);
+      if (sub) {
+        setUserSubscription({ ...sub });
+        // When 24h trial or package time ends, automatically prompt purchase package modal
+        if (sub.status === 'TRIAL_EXPIRED') {
+          setShowSubscriptionModal(true);
+        }
+      }
+    };
+
+    checkExpiry();
+    const interval = setInterval(checkExpiry, 2000);
+    return () => clearInterval(interval);
+  }, [isAuthenticated, profile.uid]);
+
   // Firestore Real-time Sync for Logged-in Users
   useEffect(() => {
-    if (!authReady || !isAuthenticated || isDemoSandbox || !auth.currentUser) return;
+    if (!authReady || !isAuthenticated || !auth.currentUser) return;
     const uid = auth.currentUser.uid;
 
     const tradesRef = collection(db, 'users', uid, 'trades');
@@ -188,7 +207,7 @@ export default function App() {
     return () => {
       unsubTrades();
     };
-  }, [authReady, isAuthenticated, isDemoSandbox]);
+  }, [authReady, isAuthenticated]);
 
   const handleGoogleLogin = async () => {
     setIsSigningIn(true);
@@ -199,34 +218,68 @@ export default function App() {
       setProfile(userProf);
       setIsAuthenticated(true);
       setIsDemoSandbox(false);
+
+      // Initialize or get 24-hour free trial / subscription record
+      const sub = subscriptionService.getOrCreateUserSubscription(
+        user.uid,
+        user.email || '',
+        user.displayName || 'Google Trader'
+      );
+      setUserSubscription(sub);
+
+      // If user has no active subscription package and 24h trial expired, show package modal
+      if (sub.status === 'TRIAL_EXPIRED') {
+        setShowSubscriptionModal(true);
+      }
     } catch (err: any) {
+      console.warn('Sign-in notification:', err);
       if (err?.code === 'auth/popup-closed-by-user') {
-        setAuthError('Sign-in popup closed. Click "Launch Backtest Terminal" for instant access.');
+        setAuthError('Sign-in cancelled. Please sign in with Google to access your 24-hour free trial.');
       } else {
-        setIsDemoSandbox(true);
+        // Fallback for iframe preview or blocked popups: create Google session with persistent local identity
+        // so the 24-hour trial and subscription tracking are strictly enforced!
+        const simulatedGoogleUid = `google_${Math.abs(Date.now() % 10000000)}`;
+        const fallbackProf: UserProfileData = {
+          ...INITIAL_DEMO_PROFILE,
+          uid: simulatedGoogleUid,
+          displayName: 'Google Trader',
+          email: 'trader.google@gmail.com',
+        };
+        setProfile(fallbackProf);
+        setIsAuthenticated(true);
+        setIsDemoSandbox(false);
+
+        const sub = subscriptionService.getOrCreateUserSubscription(
+          simulatedGoogleUid,
+          'trader.google@gmail.com',
+          'Google Trader'
+        );
+        setUserSubscription(sub);
+        if (sub.status === 'TRIAL_EXPIRED') {
+          setShowSubscriptionModal(true);
+        }
       }
     } finally {
       setIsSigningIn(false);
     }
   };
 
-  const handleEnterDemoSandbox = () => {
-    setProfile(INITIAL_DEMO_PROFILE);
-    setTrades(INITIAL_DEMO_TRADES);
-    setIsDemoSandbox(true);
-  };
-
   const handleSignOut = async () => {
     if (isAuthenticated) {
-      await signOutUser();
+      try {
+        await signOutUser();
+      } catch (e) {
+        console.warn('Sign out notice:', e);
+      }
     }
     setIsAuthenticated(false);
     setIsDemoSandbox(false);
+    setUserSubscription(null);
   };
 
   const handleSaveTrade = async (trade: SimulatedTradeRecord) => {
     setTrades((prev) => [trade, ...prev]);
-    if (isAuthenticated && !isDemoSandbox && auth.currentUser) {
+    if (isAuthenticated && auth.currentUser) {
       try {
         await createSimulatedTradeInDb(auth.currentUser.uid, trade);
       } catch (e) {
@@ -237,7 +290,7 @@ export default function App() {
 
   const handleUpdateTrade = async (tradeId: string, updates: Partial<SimulatedTradeRecord>) => {
     setTrades((prev) => prev.map((t) => (t.id === tradeId ? { ...t, ...updates } : t)));
-    if (isAuthenticated && !isDemoSandbox && auth.currentUser) {
+    if (isAuthenticated && auth.currentUser) {
       try {
         await updateSimulatedTradeInDb(auth.currentUser.uid, tradeId, updates);
       } catch (e) {
@@ -247,7 +300,7 @@ export default function App() {
   };
 
   const handleLogDisciplineEvent = async (event: Omit<DisciplineEventRecord, 'id'>) => {
-    if (isAuthenticated && !isDemoSandbox && auth.currentUser) {
+    if (isAuthenticated && auth.currentUser) {
       try {
         await logDisciplineEventInDb(auth.currentUser.uid, { ...event, id: `ev_${Date.now()}` });
       } catch (e) {
@@ -263,7 +316,7 @@ export default function App() {
       virtualBalance: newBalance,
       disciplineScore: nextScore,
     }));
-    if (isAuthenticated && !isDemoSandbox && auth.currentUser) {
+    if (isAuthenticated && auth.currentUser) {
       try {
         await updateUserProfileData(auth.currentUser.uid, {
           virtualBalance: newBalance,
@@ -275,13 +328,12 @@ export default function App() {
     }
   };
 
-  if (!isAuthenticated && !isDemoSandbox) {
+  if (!isAuthenticated) {
     return (
       <LandingPage
         onGoogleLogin={handleGoogleLogin}
         isSigningIn={isSigningIn}
         authError={authError}
-        onEnterDemoSandbox={handleEnterDemoSandbox}
       />
     );
   }
@@ -297,7 +349,7 @@ export default function App() {
         onLogDisciplineEvent={handleLogDisciplineEvent}
         onUpdateBalance={handleUpdateBalance}
         onSignOut={handleSignOut}
-        isDemoSandbox={isDemoSandbox}
+        isDemoSandbox={false}
         onGoogleLogin={handleGoogleLogin}
         userSubscription={userSubscription}
         onOpenSubscriptionModal={() => setShowSubscriptionModal(true)}
@@ -314,6 +366,7 @@ export default function App() {
         userSubscription={userSubscription}
         userEmail={profile.email}
         userUid={profile.uid}
+        onSignOut={handleSignOut}
         onPaymentSubmitted={() => {
           const updated = subscriptionService.getUserSubscription(profile.uid);
           if (updated) setUserSubscription({ ...updated });

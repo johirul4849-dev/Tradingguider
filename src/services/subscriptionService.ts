@@ -95,11 +95,184 @@ export interface InfluencerWithdrawalRequest {
   adminNotes?: string;
 }
 
+export interface CountdownDetails {
+  totalSeconds: number;
+  months: number;
+  days: number;
+  hours: number;
+  minutes: number;
+  seconds: number;
+  isExpired: boolean;
+  formattedString: string;
+  shortString: string;
+  compactClock: string;
+  progressPercent: number;
+}
+
+export function calculateRemainingCountdown(
+  expiresAt: number | undefined,
+  startedAt: number | undefined,
+  now: number = Date.now()
+): CountdownDetails {
+  if (!expiresAt) {
+    return {
+      totalSeconds: 0,
+      months: 0,
+      days: 0,
+      hours: 0,
+      minutes: 0,
+      seconds: 0,
+      isExpired: true,
+      formattedString: 'Expired (0d 0h left)',
+      shortString: 'Expired',
+      compactClock: '00m : 00d : 00h : 00m : 00s',
+      progressPercent: 0,
+    };
+  }
+
+  const diffMs = expiresAt - now;
+  if (diffMs <= 0) {
+    return {
+      totalSeconds: 0,
+      months: 0,
+      days: 0,
+      hours: 0,
+      minutes: 0,
+      seconds: 0,
+      isExpired: true,
+      formattedString: 'Expired (0d 0h left)',
+      shortString: 'Expired',
+      compactClock: '00m : 00d : 00h : 00m : 00s',
+      progressPercent: 0,
+    };
+  }
+
+  const totalSeconds = Math.floor(diffMs / 1000);
+  const totalDays = Math.floor(totalSeconds / 86400);
+
+  const months = Math.floor(totalDays / 30);
+  const days = totalDays % 30;
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  let formattedString = '';
+  if (months > 0) {
+    formattedString = `${months} Month${months > 1 ? 's' : ''}, ${days} Day${days > 1 ? 's' : ''}, ${hours}h ${minutes}m ${seconds}s`;
+  } else if (days > 0) {
+    formattedString = `${days} Day${days > 1 ? 's' : ''}, ${hours}h ${minutes}m ${seconds}s`;
+  } else {
+    formattedString = `${hours}h ${minutes}m ${seconds}s`;
+  }
+
+  const shortString =
+    months > 0
+      ? `${months}mo ${days}d`
+      : days > 0
+      ? `${days}d ${hours}h`
+      : `${hours}h ${minutes}m`;
+
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const compactClock = `${pad(months)}m : ${pad(days)}d : ${pad(hours)}h : ${pad(minutes)}m : ${pad(seconds)}s`;
+
+  let progressPercent = 100;
+  if (startedAt && startedAt < expiresAt) {
+    const totalDuration = expiresAt - startedAt;
+    progressPercent = Math.max(0, Math.min(100, Math.round((diffMs / totalDuration) * 100)));
+  }
+
+  return {
+    totalSeconds,
+    months,
+    days,
+    hours,
+    minutes,
+    seconds,
+    isExpired: false,
+    formattedString,
+    shortString,
+    compactClock,
+    progressPercent,
+  };
+}
+
 const STORAGE_KEYS = {
   SUBSCRIPTIONS: 'tp_subscriptions_v1',
   INFLUENCERS: 'tp_influencers_v1',
   WITHDRAWALS: 'tp_influencer_withdrawals_v1',
   CURRENT_INFLUENCER: 'tp_current_influencer_session',
+};
+
+// Seed default users for instant admin visibility with real countdowns
+const INITIAL_DEMO_USERS: Record<string, UserSubscriptionRecord> = {
+  usr_tareq_trial: {
+    uid: 'usr_tareq_trial',
+    email: 'tareq.fx@gmail.com',
+    displayName: 'Tareq Rahman',
+    firstLoginAt: Date.now() - 4 * 3600 * 1000 - 18 * 60 * 1000,
+    freeTrialExpiresAt: Date.now() + 19 * 3600 * 1000 + 42 * 60 * 1000,
+    status: 'TRIAL_ACTIVE',
+  },
+  usr_farhan_1mo: {
+    uid: 'usr_farhan_1mo',
+    email: 'farhan.trader@yahoo.com',
+    displayName: 'Farhan Hossain',
+    firstLoginAt: Date.now() - 7 * 86400 * 1000,
+    freeTrialExpiresAt: Date.now() - 6 * 86400 * 1000,
+    status: 'ACTIVE_SUBSCRIBED',
+    activePackageId: 'MONTH_1',
+    subscriptionExpiresAt: Date.now() + 23 * 86400 * 1000 + 8 * 3600 * 1000 + 35 * 60 * 1000,
+    lastPaymentSubmission: {
+      packageId: 'MONTH_1',
+      amountPaid: 7,
+      binanceTxId: 'BNB748910284',
+      promoCodeUsed: 'JAHID10',
+      submittedAt: Date.now() - 7 * 86400 * 1000,
+      status: 'APPROVED',
+    },
+  },
+  usr_nazmul_6mo: {
+    uid: 'usr_nazmul_6mo',
+    email: 'nazmul.smc@gmail.com',
+    displayName: 'Nazmul Islam',
+    firstLoginAt: Date.now() - 38 * 86400 * 1000,
+    freeTrialExpiresAt: Date.now() - 37 * 86400 * 1000,
+    status: 'ACTIVE_SUBSCRIBED',
+    activePackageId: 'MONTH_6',
+    subscriptionExpiresAt: Date.now() + 142 * 86400 * 1000 + 14 * 3600 * 1000,
+    lastPaymentSubmission: {
+      packageId: 'MONTH_6',
+      amountPaid: 35,
+      binanceTxId: 'BNB882019482',
+      promoCodeUsed: 'ALPHA5',
+      submittedAt: Date.now() - 38 * 86400 * 1000,
+      status: 'APPROVED',
+    },
+  },
+  usr_shakil_pending: {
+    uid: 'usr_shakil_pending',
+    email: 'shakil.crypto@outlook.com',
+    displayName: 'Shakil Ahmed',
+    firstLoginAt: Date.now() - 26 * 3600 * 1000,
+    freeTrialExpiresAt: Date.now() - 2 * 3600 * 1000,
+    status: 'PENDING_APPROVAL',
+    lastPaymentSubmission: {
+      packageId: 'MONTH_1',
+      amountPaid: 7,
+      binanceTxId: 'BNB992817461',
+      promoCodeUsed: 'JAHID10',
+      submittedAt: Date.now() - 15 * 60 * 1000,
+      status: 'PENDING',
+    },
+  },
+  usr_tanvir_expired: {
+    uid: 'usr_tanvir_expired',
+    email: 'tanvir.invest@gmail.com',
+    displayName: 'Tanvir Hasan',
+    firstLoginAt: Date.now() - 48 * 3600 * 1000,
+    freeTrialExpiresAt: Date.now() - 24 * 3600 * 1000,
+    status: 'TRIAL_EXPIRED',
+  },
 };
 
 // Seed default influencers for testing/immediate use
@@ -147,6 +320,15 @@ class SubscriptionService {
       const subsRaw = localStorage.getItem(STORAGE_KEYS.SUBSCRIPTIONS);
       if (subsRaw) {
         this.subscriptions = JSON.parse(subsRaw);
+        // Ensure initial demo users exist so admin table is always populated
+        Object.keys(INITIAL_DEMO_USERS).forEach((uid) => {
+          if (!this.subscriptions[uid]) {
+            this.subscriptions[uid] = INITIAL_DEMO_USERS[uid];
+          }
+        });
+      } else {
+        this.subscriptions = { ...INITIAL_DEMO_USERS };
+        this.saveSubscriptions();
       }
 
       const infsRaw = localStorage.getItem(STORAGE_KEYS.INFLUENCERS);
@@ -373,6 +555,34 @@ class SubscriptionService {
 
     user.status = 'TRIAL_ACTIVE';
     user.freeTrialExpiresAt = Math.max(Date.now(), user.freeTrialExpiresAt) + hours * 60 * 60 * 1000;
+    this.saveSubscriptions();
+    return true;
+  }
+
+  // Admin grants specific package duration (1 Month, 6 Months, or 12 Months)
+  public grantPackage(uid: string, packageId: 'MONTH_1' | 'MONTH_6' | 'MONTH_12') {
+    const user = this.subscriptions[uid];
+    if (!user) return false;
+
+    const pkg = SUBSCRIPTION_PACKAGES[packageId];
+    const durationDays = pkg ? pkg.durationDays : 30;
+    const now = Date.now();
+
+    user.status = 'ACTIVE_SUBSCRIBED';
+    user.activePackageId = packageId;
+    user.subscriptionExpiresAt = now + durationDays * 24 * 60 * 60 * 1000;
+    this.saveSubscriptions();
+    return true;
+  }
+
+  // Admin immediately expires/locks a user
+  public expireUserNow(uid: string) {
+    const user = this.subscriptions[uid];
+    if (!user) return false;
+
+    user.status = 'TRIAL_EXPIRED';
+    user.subscriptionExpiresAt = Date.now() - 1000;
+    user.freeTrialExpiresAt = Date.now() - 1000;
     this.saveSubscriptions();
     return true;
   }

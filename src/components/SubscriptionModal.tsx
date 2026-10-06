@@ -26,6 +26,7 @@ interface SubscriptionModalProps {
   userEmail: string;
   userUid: string;
   onPaymentSubmitted?: () => void;
+  onSignOut?: () => void;
 }
 
 export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
@@ -34,6 +35,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
   userSubscription,
   userUid,
   onPaymentSubmitted,
+  onSignOut,
 }) => {
   const [selectedPkgId, setSelectedPkgId] = useState<'MONTH_1' | 'MONTH_6' | 'MONTH_12'>('MONTH_6');
   const [promoCodeInput, setPromoCodeInput] = useState('');
@@ -143,6 +145,19 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
             <div className="font-mono text-white bg-[#00E676]/20 px-2.5 py-1 rounded-md font-bold">
               {trialHours}h {trialMins}m remaining
             </div>
+          </div>
+        )}
+
+        {/* 24-Hour Free Trial / Subscription Expired Banner */}
+        {userSubscription?.status === 'TRIAL_EXPIRED' && (
+          <div className="my-4 p-4 rounded-xl bg-rose-500/15 border border-rose-500/40 text-xs">
+            <div className="flex items-center gap-2 text-rose-300 font-bold mb-1">
+              <AlertCircle className="w-4 h-4 text-rose-400" />
+              <span>Free Access / Package Time Ended — Purchase Package to Continue</span>
+            </div>
+            <p className="text-slate-300">
+              Your free trial period has ended. Select a 1, 6, or 12 month package below to unlock and practice on the live chart and backtest terminal.
+            </p>
           </div>
         )}
 
@@ -326,24 +341,43 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
           )}
         </div>
 
-        {/* Submit Button */}
-        <div className="flex items-center justify-end gap-3 pt-2 border-t border-[#2A2E39]">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-2.5 rounded-xl text-xs font-semibold text-[#94A3B8] hover:text-white transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={handleSubmitPayment}
-            disabled={isSubmitting}
-            className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gradient-to-r from-[#2962FF] to-[#00E676] hover:from-[#1E53E5] hover:to-[#00C853] text-xs font-bold text-white shadow-lg shadow-[#2962FF]/30 transition-all cursor-pointer disabled:opacity-50"
-          >
-            <ShieldCheck className="w-4 h-4" />
-            {isSubmitting ? 'Submitting...' : `Submit Payment ($${finalPrice}) for Approval`}
-          </button>
+        {/* Submit & Exit Buttons */}
+        <div className="flex items-center justify-between gap-3 pt-3 border-t border-[#2A2E39]">
+          <div>
+            {onSignOut && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onSignOut();
+                }}
+                className="px-3 py-2 rounded-xl text-xs font-semibold text-rose-400 hover:text-white bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 transition-colors cursor-pointer"
+              >
+                Log Out of Account
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2.5">
+            {userSubscription?.status !== 'TRIAL_EXPIRED' && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-[#94A3B8] hover:text-white transition-colors cursor-pointer"
+              >
+                Close
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleSubmitPayment}
+              disabled={isSubmitting}
+              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gradient-to-r from-[#2962FF] to-[#00E676] hover:from-[#1E53E5] hover:to-[#00C853] text-xs font-bold text-white shadow-lg shadow-[#2962FF]/30 transition-all cursor-pointer disabled:opacity-50"
+            >
+              <ShieldCheck className="w-4 h-4" />
+              <span>{isSubmitting ? 'Submitting...' : `Submit Payment ($${finalPrice}) for Approval`}</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

@@ -14,6 +14,11 @@ import {
   Check,
   AlertTriangle,
   RefreshCw,
+  Sparkles,
+  Calendar,
+  Hourglass,
+  Sliders,
+  Zap,
 } from 'lucide-react';
 import {
   subscriptionService,
@@ -22,6 +27,7 @@ import {
   InfluencerRecord,
   InfluencerWithdrawalRequest,
   SUBSCRIPTION_PACKAGES,
+  calculateRemainingCountdown,
 } from '../services/subscriptionService';
 
 interface AdminPanelModalProps {
@@ -34,10 +40,19 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({ isOpen, onClos
   const [passcodeInput, setPasscodeInput] = useState('');
   const [passcodeError, setPasscodeError] = useState<string | null>(null);
 
-  // Tabs: 'REQUESTS' | 'FINANCE' | 'INFLUENCERS' | 'WITHDRAWALS' | 'MANUAL_GRANT'
+  // Tabs: 'USER_COUNTDOWNS' | 'REQUESTS' | 'FINANCE' | 'INFLUENCERS' | 'WITHDRAWALS' | 'MANUAL_GRANT'
   const [activeTab, setActiveTab] = useState<
-    'REQUESTS' | 'FINANCE' | 'INFLUENCERS' | 'WITHDRAWALS' | 'MANUAL_GRANT'
-  >('REQUESTS');
+    'USER_COUNTDOWNS' | 'REQUESTS' | 'FINANCE' | 'INFLUENCERS' | 'WITHDRAWALS' | 'MANUAL_GRANT'
+  >('USER_COUNTDOWNS');
+
+  // Real-time ticking clock for auto countdown
+  const [currentTime, setCurrentTime] = useState<number>(Date.now());
+
+  // Filter & Search for user countdowns
+  const [userSearchTerm, setUserSearchTerm] = useState('');
+  const [userStatusFilter, setUserStatusFilter] = useState<
+    'ALL' | 'TRIAL' | 'SUBSCRIBED' | 'PENDING' | 'EXPIRED'
+  >('ALL');
 
   // Live data states
   const [subscriptions, setSubscriptions] = useState<UserSubscriptionRecord[]>([]);
@@ -54,6 +69,14 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({ isOpen, onClos
     setInfluencers(subscriptionService.getAllInfluencers());
     setWithdrawals(subscriptionService.getAllWithdrawals());
   };
+
+  // Live tick every second for real-time month & time countdown
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (isOpen && isAuthenticated) {
@@ -103,6 +126,24 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({ isOpen, onClos
     }
   };
 
+  const handleGrantPackage = (uid: string, packageId: 'MONTH_1' | 'MONTH_6' | 'MONTH_12') => {
+    const ok = subscriptionService.grantPackage(uid, packageId);
+    if (ok) {
+      setActionNotice(`Granted ${SUBSCRIPTION_PACKAGES[packageId].name} to user! Countdown started.`);
+      refreshData();
+      setTimeout(() => setActionNotice(null), 3500);
+    }
+  };
+
+  const handleExpireUser = (uid: string) => {
+    const ok = subscriptionService.expireUserNow(uid);
+    if (ok) {
+      setActionNotice('User access expired and locked. User will be prompted to purchase package.');
+      refreshData();
+      setTimeout(() => setActionNotice(null), 3500);
+    }
+  };
+
   const handleApproveWithdrawal = (id: string) => {
     const ok = subscriptionService.approveWithdrawal(id);
     if (ok) {
@@ -135,6 +176,22 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({ isOpen, onClos
     (s) => s.lastPaymentSubmission && s.lastPaymentSubmission.status === 'PENDING'
   );
   const pendingWiths = withdrawals.filter((w) => w.status === 'PENDING');
+
+  // Filtered users for countdown tab
+  const filteredUsers = subscriptions.filter((u) => {
+    const matchesSearch =
+      u.displayName.toLowerCase().includes(userSearchTerm.toLowerCase()) ||
+      u.email.toLowerCase().includes(userSearchTerm.toLowerCase()) ||
+      u.uid.toLowerCase().includes(userSearchTerm.toLowerCase());
+
+    if (!matchesSearch) return false;
+
+    if (userStatusFilter === 'TRIAL') return u.status === 'TRIAL_ACTIVE';
+    if (userStatusFilter === 'SUBSCRIBED') return u.status === 'ACTIVE_SUBSCRIBED';
+    if (userStatusFilter === 'PENDING') return u.status === 'PENDING_APPROVAL';
+    if (userStatusFilter === 'EXPIRED') return u.status === 'TRIAL_EXPIRED';
+    return true;
+  });
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md p-4 overflow-y-auto">
@@ -205,8 +262,20 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({ isOpen, onClos
               {/* Navigation Tabs */}
               <div className="flex items-center gap-1.5 flex-wrap">
                 <button
+                  onClick={() => setActiveTab('USER_COUNTDOWNS')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all relative flex items-center gap-1.5 cursor-pointer ${
+                    activeTab === 'USER_COUNTDOWNS'
+                      ? 'bg-gradient-to-r from-[#2962FF] to-[#00E5FF] text-white shadow-md'
+                      : 'bg-[#181C27] text-[#94A3B8] hover:text-white'
+                  }`}
+                >
+                  <Hourglass className="w-3.5 h-3.5 text-[#00E5FF]" />
+                  <span>User Countdowns ({subscriptions.length})</span>
+                </button>
+
+                <button
                   onClick={() => setActiveTab('REQUESTS')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all relative ${
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all relative cursor-pointer ${
                     activeTab === 'REQUESTS'
                       ? 'bg-[#2962FF] text-white'
                       : 'bg-[#181C27] text-[#94A3B8] hover:text-white'
@@ -222,7 +291,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({ isOpen, onClos
 
                 <button
                   onClick={() => setActiveTab('FINANCE')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                     activeTab === 'FINANCE'
                       ? 'bg-[#2962FF] text-white'
                       : 'bg-[#181C27] text-[#94A3B8] hover:text-white'
@@ -233,7 +302,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({ isOpen, onClos
 
                 <button
                   onClick={() => setActiveTab('INFLUENCERS')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                     activeTab === 'INFLUENCERS'
                       ? 'bg-[#2962FF] text-white'
                       : 'bg-[#181C27] text-[#94A3B8] hover:text-white'
@@ -244,7 +313,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({ isOpen, onClos
 
                 <button
                   onClick={() => setActiveTab('WITHDRAWALS')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all relative ${
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all relative cursor-pointer ${
                     activeTab === 'WITHDRAWALS'
                       ? 'bg-[#2962FF] text-white'
                       : 'bg-[#181C27] text-[#94A3B8] hover:text-white'
@@ -260,7 +329,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({ isOpen, onClos
 
                 <button
                   onClick={() => setActiveTab('MANUAL_GRANT')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                     activeTab === 'MANUAL_GRANT'
                       ? 'bg-[#2962FF] text-white'
                       : 'bg-[#181C27] text-[#94A3B8] hover:text-white'
@@ -276,6 +345,304 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({ isOpen, onClos
               <div className="mb-4 p-3 rounded-lg bg-[#00E676]/15 border border-[#00E676]/40 text-xs font-semibold text-[#00E676] flex items-center gap-2">
                 <Check className="w-4 h-4" />
                 {actionNotice}
+              </div>
+            )}
+
+            {/* TAB 0: LIVE USER COUNTDOWNS & SUBSCRIPTION MANAGEMENT */}
+            {activeTab === 'USER_COUNTDOWNS' && (
+              <div className="space-y-4">
+                {/* Header with Search and Filter */}
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 bg-[#0B0E14] p-4 rounded-xl border border-[#2A2E39]">
+                  <div>
+                    <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                      <Hourglass className="w-4 h-4 text-[#00E5FF] animate-pulse" />
+                      <span>Live User Access & Month Countdowns</span>
+                      <span className="text-[11px] font-mono font-normal text-[#00E676] bg-[#00E676]/15 px-2 py-0.5 rounded-full border border-[#00E676]/30">
+                        Auto-Updating Live
+                      </span>
+                    </h4>
+                    <p className="text-xs text-[#94A3B8] mt-0.5">
+                      Real-time live month, day, hour, minute and second countdown for every registered user.
+                    </p>
+                  </div>
+
+                  {/* Search Bar */}
+                  <div className="relative w-full md:w-64">
+                    <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-[#64748B]" />
+                    <input
+                      type="text"
+                      placeholder="Search Name, Email, UID..."
+                      value={userSearchTerm}
+                      onChange={(e) => setUserSearchTerm(e.target.value)}
+                      className="w-full bg-[#181C27] border border-[#2A2E39] rounded-lg pl-8 pr-3 py-1.5 text-xs text-white placeholder-[#64748B] focus:outline-none focus:border-[#2962FF]"
+                    />
+                  </div>
+                </div>
+
+                {/* Filter Pills */}
+                <div className="flex items-center gap-2 flex-wrap text-xs">
+                  <span className="text-[#64748B] text-[11px] font-mono mr-1">Filter by status:</span>
+                  {(
+                    [
+                      { id: 'ALL', label: `All Users (${subscriptions.length})` },
+                      {
+                        id: 'TRIAL',
+                        label: `24h Trial Active (${subscriptions.filter((s) => s.status === 'TRIAL_ACTIVE').length})`,
+                      },
+                      {
+                        id: 'SUBSCRIBED',
+                        label: `Pro Subscribed (${subscriptions.filter((s) => s.status === 'ACTIVE_SUBSCRIBED').length})`,
+                      },
+                      {
+                        id: 'PENDING',
+                        label: `Pending Review (${subscriptions.filter((s) => s.status === 'PENDING_APPROVAL').length})`,
+                      },
+                      {
+                        id: 'EXPIRED',
+                        label: `Expired (${subscriptions.filter((s) => s.status === 'TRIAL_EXPIRED').length})`,
+                      },
+                    ] as const
+                  ).map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setUserStatusFilter(f.id)}
+                      className={`px-3 py-1 rounded-lg font-medium transition-all cursor-pointer ${
+                        userStatusFilter === f.id
+                          ? 'bg-[#2962FF] text-white shadow-sm'
+                          : 'bg-[#181C27] text-[#94A3B8] hover:text-white border border-[#2A2E39]'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* User Cards List with Live Auto Countdowns */}
+                {filteredUsers.length === 0 ? (
+                  <div className="p-8 text-center bg-[#0B0E14] border border-[#2A2E39] rounded-xl text-xs text-[#64748B]">
+                    No users match your search or filter.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {filteredUsers.map((user) => {
+                      const isSubscribed = user.status === 'ACTIVE_SUBSCRIBED';
+                      const isTrial = user.status === 'TRIAL_ACTIVE';
+                      const isPending = user.status === 'PENDING_APPROVAL';
+                      const isExpired = user.status === 'TRIAL_EXPIRED';
+
+                      const expiresAt = isSubscribed
+                        ? user.subscriptionExpiresAt
+                        : isTrial
+                        ? user.freeTrialExpiresAt
+                        : isPending && user.freeTrialExpiresAt
+                        ? user.freeTrialExpiresAt
+                        : user.freeTrialExpiresAt || 0;
+
+                      const startedAt = isSubscribed
+                        ? user.lastPaymentSubmission?.submittedAt || user.firstLoginAt
+                        : user.firstLoginAt;
+
+                      const countdown = calculateRemainingCountdown(expiresAt, startedAt, currentTime);
+
+                      const pkgName = user.activePackageId
+                        ? SUBSCRIPTION_PACKAGES[user.activePackageId]?.name
+                        : isTrial
+                        ? '24-Hour Free Backtest Trial'
+                        : isSubscribed
+                        ? 'Pro Pass'
+                        : 'No Active Package';
+
+                      return (
+                        <div
+                          key={user.uid}
+                          className={`p-4 rounded-xl bg-[#0B0E14] border transition-all ${
+                            isExpired
+                              ? 'border-rose-900/60 bg-rose-950/10'
+                              : isPending
+                              ? 'border-amber-700/60 bg-amber-950/10'
+                              : isSubscribed
+                              ? 'border-blue-700/60 bg-blue-950/10'
+                              : 'border-emerald-700/60 bg-emerald-950/10'
+                          }`}
+                        >
+                          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                            {/* User Info Column */}
+                            <div className="flex items-start gap-3.5 min-w-[240px]">
+                              <div
+                                className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-sm text-white shrink-0 ${
+                                  isExpired
+                                    ? 'bg-rose-900 text-rose-200'
+                                    : isSubscribed
+                                    ? 'bg-gradient-to-tr from-[#2962FF] to-[#00E5FF]'
+                                    : isTrial
+                                    ? 'bg-emerald-600'
+                                    : 'bg-amber-600'
+                                }`}
+                              >
+                                {user.displayName ? user.displayName.charAt(0).toUpperCase() : 'U'}
+                              </div>
+
+                              <div className="space-y-0.5">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-bold text-white text-sm">{user.displayName}</span>
+                                  {/* Status Badges */}
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold tracking-wider uppercase border ${
+                                      isSubscribed
+                                        ? 'bg-blue-500/20 text-[#38BDF8] border-blue-500/40'
+                                        : isTrial
+                                        ? 'bg-emerald-500/20 text-[#00E676] border-emerald-500/40'
+                                        : isPending
+                                        ? 'bg-amber-500/20 text-[#F59E0B] border-amber-500/40'
+                                        : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                                    }`}
+                                  >
+                                    {isSubscribed
+                                      ? 'PRO SUBSCRIBED'
+                                      : isTrial
+                                      ? '24H TRIAL ACTIVE'
+                                      : isPending
+                                      ? 'PAYMENT PENDING'
+                                      : 'EXPIRED / LOCKED'}
+                                  </span>
+                                </div>
+
+                                <div className="text-xs text-[#94A3B8] font-mono flex items-center gap-2">
+                                  <span>{user.email}</span>
+                                  <span className="text-[#64748B]">·</span>
+                                  <span className="text-[10px] text-[#64748B]">UID: {user.uid}</span>
+                                </div>
+
+                                <div className="text-[11px] text-[#64748B] flex items-center gap-2 pt-0.5">
+                                  <span>Package: <strong className="text-white">{pkgName}</strong></span>
+                                  <span>·</span>
+                                  <span>First joined: {new Date(user.firstLoginAt).toLocaleDateString()}</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Center Column: LIVE REAL-TIME COUNTDOWN TIMER (Months, Days, Hours, Mins, Secs) */}
+                            <div className="flex-1 max-w-md bg-[#131722] p-3 rounded-xl border border-[#2A2E39]">
+                              <div className="flex items-center justify-between text-xs mb-1.5">
+                                <span className="text-[#94A3B8] font-mono flex items-center gap-1.5">
+                                  <Clock className={`w-3.5 h-3.5 ${countdown.isExpired ? 'text-rose-400' : 'text-[#00E5FF] animate-spin-slow'}`} />
+                                  <span>Auto Countdown Timer</span>
+                                </span>
+                                <span
+                                  className={`font-mono text-xs font-bold ${
+                                    countdown.isExpired ? 'text-rose-400' : 'text-[#00E676]'
+                                  }`}
+                                >
+                                  {countdown.isExpired ? 'TIME EXPIRED' : `${countdown.progressPercent}% Time Left`}
+                                </span>
+                              </div>
+
+                              {/* Ticking Digital Monospace Clock */}
+                              <div
+                                className={`text-base sm:text-lg font-black font-mono tracking-wider py-1 px-2.5 rounded-lg border text-center ${
+                                  countdown.isExpired
+                                    ? 'bg-rose-950/40 border-rose-800 text-rose-300'
+                                    : 'bg-[#0B0E14] border-slate-700 text-white shadow-inner'
+                                }`}
+                              >
+                                {countdown.compactClock}
+                              </div>
+
+                              {/* Verbal readable format */}
+                              <div className="mt-1 flex items-center justify-between text-[11px] font-mono text-[#94A3B8]">
+                                <span className={countdown.isExpired ? 'text-rose-400 font-bold' : 'text-[#00E5FF]'}>
+                                  {countdown.formattedString}
+                                </span>
+                                {Boolean(expiresAt && expiresAt > 0) && (
+                                  <span className="text-[#64748B]">
+                                    Ends: {new Date(expiresAt || 0).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Visual Progress Bar */}
+                              <div className="w-full bg-[#1F2430] h-1.5 rounded-full mt-2 overflow-hidden">
+                                <div
+                                  className={`h-full transition-all duration-500 rounded-full ${
+                                    countdown.isExpired
+                                      ? 'bg-rose-500 w-0'
+                                      : countdown.progressPercent > 50
+                                      ? 'bg-[#00E676]'
+                                      : countdown.progressPercent > 20
+                                      ? 'bg-amber-400'
+                                      : 'bg-rose-400'
+                                  }`}
+                                  style={{ width: `${countdown.isExpired ? 0 : countdown.progressPercent}%` }}
+                                />
+                              </div>
+                            </div>
+
+                            {/* Right Column: One-Click Instant Admin Controls */}
+                            <div className="flex flex-col sm:flex-row lg:flex-col gap-1.5 shrink-0 justify-center">
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleGrantTrial(user.uid)}
+                                  className="px-2.5 py-1 rounded-md bg-[#181C27] hover:bg-[#2A2E39] text-[11px] font-semibold text-[#00E5FF] border border-[#00E5FF]/30 transition-all cursor-pointer whitespace-nowrap"
+                                  title="Add +24h Free Trial Access"
+                                >
+                                  +24h Trial
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleGrantPackage(user.uid, 'MONTH_1')}
+                                  className="px-2.5 py-1 rounded-md bg-[#2962FF]/20 hover:bg-[#2962FF]/40 text-[11px] font-semibold text-white border border-[#2962FF]/40 transition-all cursor-pointer whitespace-nowrap"
+                                  title="Activate 1 Month Pro Pass (30 Days)"
+                                >
+                                  +1 Mo (30d)
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleGrantPackage(user.uid, 'MONTH_6')}
+                                  className="px-2.5 py-1 rounded-md bg-purple-500/20 hover:bg-purple-500/40 text-[11px] font-semibold text-purple-300 border border-purple-500/40 transition-all cursor-pointer whitespace-nowrap"
+                                  title="Activate 6 Months Mastery (180 Days)"
+                                >
+                                  +6 Mo (180d)
+                                </button>
+                              </div>
+
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleGrantPackage(user.uid, 'MONTH_12')}
+                                  className="px-2.5 py-1 rounded-md bg-amber-500/20 hover:bg-amber-500/40 text-[11px] font-semibold text-amber-300 border border-amber-500/40 transition-all cursor-pointer whitespace-nowrap"
+                                  title="Activate 12 Months Elite Pass (365 Days)"
+                                >
+                                  +1 Year (365d)
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleExpireUser(user.uid)}
+                                  className="px-2.5 py-1 rounded-md bg-rose-500/20 hover:bg-rose-500/40 text-[11px] font-semibold text-rose-300 border border-rose-500/40 transition-all cursor-pointer whitespace-nowrap"
+                                  title="Expire Access Immediately (Prompt to purchase package)"
+                                >
+                                  Expire Now
+                                </button>
+
+                                {isPending && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleApproveSub(user.uid)}
+                                    className="px-3 py-1 rounded-md bg-[#00E676] hover:bg-[#00C853] text-[11px] font-black text-black shadow-md cursor-pointer whitespace-nowrap"
+                                  >
+                                    Approve
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
 
