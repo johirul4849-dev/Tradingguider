@@ -209,6 +209,7 @@ interface TradingChartProps {
   onOpenAutoBacktestReport?: () => void;
   onOpenPairPlaybook?: () => void;
   onInspectCandle?: (candle: CandleData, index: number) => void;
+  onCandleTimerElapsed?: () => void;
 }
 
 function computeHeikinAshi(candles: CandleData[]): CandleData[] {
@@ -313,6 +314,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const overlaySeriesRefs = useRef<ISeriesApi<any>[]>([]);
   const candlesRef = useRef<CandleData[]>(candles);
   candlesRef.current = candles;
+  const currentSeriesTypeRef = useRef<ChartVisualType | null>(null);
+  const currentSeriesSymbolRef = useRef<SupportedSymbol | null>(null);
+  const prevCandlesCountRef = useRef<number>(0);
 
   // Local state fallbacks for SMC & Educational Backtest Mentor
   const [internalHighImpactSmc, setInternalHighImpactSmc] = useState<boolean>(true);
@@ -420,23 +424,34 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const bidPrice = currentClose ? currentClose - spread : 0;
 
   // Real-time calculation of candle close countdown
+  // Auto-calculates based on current clock period and automatically resets to full duration when period completes
   useEffect(() => {
     const updateCountdown = () => {
       const stepSec = TIMEFRAME_SECONDS[timeframe] || 900;
       const nowSec = Math.floor(Date.now() / 1000);
-      const lastCandleTime = currentCandle?.time || nowSec;
-      const nextCandleTime = lastCandleTime + stepSec;
-      const remainingSec = Math.max(0, nextCandleTime - nowSec);
+      const currentPeriodStart = Math.floor(nowSec / stepSec) * stepSec;
+      const nextPeriodStart = currentPeriodStart + stepSec;
+      const remainingSec = Math.max(0, nextPeriodStart - nowSec);
 
-      const mins = Math.floor(remainingSec / 60);
+      const hours = Math.floor(remainingSec / 3600);
+      const mins = Math.floor((remainingSec % 3600) / 60);
       const secs = remainingSec % 60;
-      setCandleCountdown(`${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`);
+
+      if (hours > 0) {
+        setCandleCountdown(
+          `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+        );
+      } else {
+        setCandleCountdown(
+          `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+        );
+      }
     };
 
     updateCountdown();
     const interval = setInterval(updateCountdown, 1000);
     return () => clearInterval(interval);
-  }, [timeframe, currentCandle]);
+  }, [timeframe]);
 
   // Determine current active/draft SL, TP, Entry
   const isDraftMode = draftOrder !== null && draftOrder.active;
@@ -647,32 +662,80 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     };
   }, []);
 
-  // Update Series when candles or chart type changes
+  // Update Series when candles, indicators or chart type changes
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart || candles.length === 0) return;
 
-    if (mainSeriesRef.current) {
-      try {
-        chart.removeSeries(mainSeriesRef.current);
-      } catch (_e) {
-        // ignore
+    const candleDataToUse = chartType === 'heikin' ? computeHeikinAshi(candles) : candles;
+    const sameSeriesType =
+      currentSeriesTypeRef.current === chartType &&
+      currentSeriesSymbolRef.current === symbol &&
+      mainSeriesRef.current !== null;
+
+    if (!sameSeriesType) {
+      if (mainSeriesRef.current) {
+        try {
+          chart.removeSeries(mainSeriesRef.current);
+        } catch (_e) {
+          // ignore
+        }
+        mainSeriesRef.current = null;
       }
-      mainSeriesRef.current = null;
+
+      let series: ISeriesApi<any>;
+
+      if (chartType === 'candlestick' || chartType === 'heikin') {
+        series = chart.addSeries(CandlestickSeries, {
+          upColor: '#089981',
+          downColor: '#F23645',
+          borderUpColor: '#089981',
+          borderDownColor: '#F23645',
+          wickUpColor: '#089981',
+          wickDownColor: '#F23645',
+        });
+      } else if (chartType === 'hollow') {
+        series = chart.addSeries(CandlestickSeries, {
+          upColor: 'transparent',
+          downColor: '#F23645',
+          borderUpColor: '#089981',
+          borderDownColor: '#F23645',
+          wickUpColor: '#089981',
+          wickDownColor: '#F23645',
+        });
+      } else if (chartType === 'line') {
+        series = chart.addSeries(LineSeries, {
+          color: '#2962FF',
+          lineWidth: 2,
+        });
+      } else if (chartType === 'area') {
+        series = chart.addSeries(AreaSeries, {
+          topColor: 'rgba(41, 98, 255, 0.45)',
+          bottomColor: 'rgba(41, 98, 255, 0.02)',
+          lineColor: '#2962FF',
+          lineWidth: 2,
+        });
+      } else {
+        series = chart.addSeries(BaselineSeries, {
+          baseValue: { type: 'price', price: currentClose },
+          topFillColor1: 'rgba(8, 153, 129, 0.35)',
+          topFillColor2: 'rgba(8, 153, 129, 0.05)',
+          topLineColor: '#089981',
+          bottomFillColor1: 'rgba(242, 54, 69, 0.05)',
+          bottomFillColor2: 'rgba(242, 54, 69, 0.35)',
+          bottomLineColor: '#F23645',
+          lineWidth: 2,
+        });
+      }
+
+      mainSeriesRef.current = series;
+      currentSeriesTypeRef.current = chartType;
+      currentSeriesSymbolRef.current = symbol;
     }
 
-    const candleDataToUse = chartType === 'heikin' ? computeHeikinAshi(candles) : candles;
-    let series: ISeriesApi<any>;
-
+    // Set series data smoothly
+    const series = mainSeriesRef.current!;
     if (chartType === 'candlestick' || chartType === 'heikin') {
-      series = chart.addSeries(CandlestickSeries, {
-        upColor: '#089981',
-        downColor: '#F23645',
-        borderUpColor: '#089981',
-        borderDownColor: '#F23645',
-        wickUpColor: '#089981',
-        wickDownColor: '#F23645',
-      });
       series.setData(
         candleDataToUse.map((c) => ({
           time: c.time as UTCTimestamp,
@@ -683,14 +746,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         }))
       );
     } else if (chartType === 'hollow') {
-      series = chart.addSeries(CandlestickSeries, {
-        upColor: 'transparent',
-        downColor: '#F23645',
-        borderUpColor: '#089981',
-        borderDownColor: '#F23645',
-        wickUpColor: '#089981',
-        wickDownColor: '#F23645',
-      });
       series.setData(
         candles.map((c) => ({
           time: c.time as UTCTimestamp,
@@ -700,35 +755,17 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           close: c.close,
         }))
       );
-    } else if (chartType === 'line') {
-      series = chart.addSeries(LineSeries, {
-        color: '#2962FF',
-        lineWidth: 2,
-      });
-      series.setData(candles.map((c) => ({ time: c.time as UTCTimestamp, value: c.close })));
-    } else if (chartType === 'area') {
-      series = chart.addSeries(AreaSeries, {
-        topColor: 'rgba(41, 98, 255, 0.45)',
-        bottomColor: 'rgba(41, 98, 255, 0.02)',
-        lineColor: '#2962FF',
-        lineWidth: 2,
-      });
-      series.setData(candles.map((c) => ({ time: c.time as UTCTimestamp, value: c.close })));
     } else {
-      series = chart.addSeries(BaselineSeries, {
-        baseValue: { type: 'price', price: currentClose },
-        topFillColor1: 'rgba(8, 153, 129, 0.35)',
-        topFillColor2: 'rgba(8, 153, 129, 0.05)',
-        topLineColor: '#089981',
-        bottomFillColor1: 'rgba(242, 54, 69, 0.05)',
-        bottomFillColor2: 'rgba(242, 54, 69, 0.35)',
-        bottomLineColor: '#F23645',
-        lineWidth: 2,
-      });
       series.setData(candles.map((c) => ({ time: c.time as UTCTimestamp, value: c.close })));
     }
 
-    mainSeriesRef.current = series;
+    // When a brand new candle forms (candles count increases), automatically scroll time scale to live candle
+    if (candles.length > prevCandlesCountRef.current && prevCandlesCountRef.current > 0) {
+      try {
+        chart.timeScale().scrollToRealTime();
+      } catch (_e) {}
+    }
+    prevCandlesCountRef.current = candles.length;
 
     // Attach overlays
     overlaySeriesRefs.current.forEach((s) => {

@@ -372,8 +372,10 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
     // Immediately load from pair cache so chart never flashes or disappears
     const cached = pairCandlesCache.current[newSymbol] || MarketDataProvider.getThreeMonthCandles(newSymbol, timeframe, 1500);
     setAllCandles(cached);
+    allCandlesRef.current = cached;
     const startIdx = isReplayMode ? Math.max(100, cached.length - 120) : cached.length - 1;
     setReplayIndex(startIdx);
+    replayIndexRef.current = startIdx;
     setIsPlaying(false);
     setDraftOrder(null);
     setAiAutoMark(null);
@@ -390,10 +392,13 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
         pairCandlesCache.current[newSymbol] = res.candles;
         if (activeSymbolRef.current === newSymbol) {
           setAllCandles(res.candles);
+          allCandlesRef.current = res.candles;
           if (isReplayMode) {
             setReplayIndex(Math.max(100, res.candles.length - 120));
+            replayIndexRef.current = Math.max(100, res.candles.length - 120);
           } else {
             setReplayIndex(res.candles.length - 1);
+            replayIndexRef.current = res.candles.length - 1;
           }
           setDiscoveredSetups(findAiTechniqueSetups(res.candles, newSymbol, timeframe));
         }
@@ -408,6 +413,8 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
   isReplayModeRef.current = isReplayMode;
   const replayIndexRef = useRef(replayIndex);
   replayIndexRef.current = replayIndex;
+  const allCandlesRef = useRef<CandleData[]>(allCandles);
+  allCandlesRef.current = allCandles;
 
   useEffect(() => {
     liveMarketStreamer.setSymbolAndTimeframe(symbol, timeframe);
@@ -427,17 +434,39 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
       prevPriceRef.current = tick.price;
 
       // If at real-time tip, update the running candle in allCandles
-      if (!isReplayModeRef.current || replayIndexRef.current >= allCandles.length - 1) {
+      if (!isReplayModeRef.current || replayIndexRef.current >= allCandlesRef.current.length - 1) {
         setAllCandles((prev) => {
-          if (prev.length === 0) return prev;
+          if (!prev || prev.length === 0) return prev;
           const copy = [...prev];
           const lastIdx = copy.length - 1;
           const last = copy[lastIdx];
 
-          // If new candle timeframe period has arrived
           const stepSec = TIMEFRAME_SECONDS[timeframe] || 900;
-          if (tick.candle.time > last.time + stepSec) {
-            copy.push(tick.candle);
+          const nowSec = Math.floor(Date.now() / 1000);
+          const currentPeriodStart = Math.floor(nowSec / stepSec) * stepSec;
+
+          // If current candle period has completed and new candle timeframe period has arrived
+          if (last.time < currentPeriodStart) {
+            let nextTime = last.time + stepSec;
+            while (nextTime <= currentPeriodStart && copy.length < 3500) {
+              const prevClose = copy[copy.length - 1].close;
+              const p = nextTime === currentPeriodStart ? tick.price : prevClose;
+              copy.push({
+                time: nextTime,
+                open: prevClose,
+                high: Math.max(prevClose, p),
+                low: Math.min(prevClose, p),
+                close: p,
+                volume: 1,
+              });
+              nextTime += stepSec;
+            }
+            pairCandlesCache.current[symbol] = copy;
+            allCandlesRef.current = copy;
+            if (!isReplayModeRef.current) {
+              setReplayIndex(copy.length - 1);
+              replayIndexRef.current = copy.length - 1;
+            }
             return copy;
           }
 
@@ -448,6 +477,8 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
             low: Math.min(last.low, tick.price),
             volume: last.volume + 1,
           };
+          pairCandlesCache.current[symbol] = copy;
+          allCandlesRef.current = copy;
           return copy;
         });
       }
@@ -459,18 +490,94 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
     };
   }, [symbol, timeframe]);
 
+  // Auto-roll new candle immediately when candle timer countdown reaches 00:00
+  // (Guarantees auto-countdown resets and auto new candle forms without needing to change timeframe)
+  useEffect(() => {
+    if (isReplayMode) return;
+
+    const checkAndRollNewCandle = () => {
+      const stepSec = TIMEFRAME_SECONDS[timeframe] || 900;
+      const nowSec = Math.floor(Date.now() / 1000);
+      const currentPeriodStart = Math.floor(nowSec / stepSec) * stepSec;
+
+      setAllCandles((prev) => {
+        if (!prev || prev.length === 0) return prev;
+        const last = prev[prev.length - 1];
+        if (!last) return prev;
+
+        // When current candle close time has arrived or passed
+        if (last.time < currentPeriodStart) {
+          const copy = [...prev];
+          const currentP = prevPriceRef.current > 0 ? prevPriceRef.current : last.close;
+          let nextTime = last.time + stepSec;
+
+          while (nextTime <= currentPeriodStart && copy.length < 3500) {
+            const prevClose = copy[copy.length - 1].close;
+            const p = nextTime === currentPeriodStart ? currentP : prevClose;
+            copy.push({
+              time: nextTime,
+              open: prevClose,
+              high: Math.max(prevClose, p),
+              low: Math.min(prevClose, p),
+              close: p,
+              volume: 1,
+            });
+            nextTime += stepSec;
+          }
+          pairCandlesCache.current[symbol] = copy;
+          allCandlesRef.current = copy;
+          setReplayIndex(copy.length - 1);
+          replayIndexRef.current = copy.length - 1;
+          return copy;
+        }
+        return prev;
+      });
+    };
+
+    checkAndRollNewCandle();
+    const timer = setInterval(checkAndRollNewCandle, 1000);
+    return () => clearInterval(timer);
+  }, [timeframe, symbol, isReplayMode]);
+
   // Initial / Pair-Change Data Fetch on Mount or Symbol/Timeframe Change
   useEffect(() => {
     let mounted = true;
     MarketDataProvider.fetchThreeMonthHistoryAndLive(symbol, timeframe).then((res) => {
       if (!mounted) return;
       if (res.candles && res.candles.length >= 30) {
-        pairCandlesCache.current[symbol] = res.candles;
-        setAllCandles(res.candles);
-        const startIdx = isReplayMode ? Math.max(30, res.candles.length - 120) : res.candles.length - 1;
+        const stepSec = TIMEFRAME_SECONDS[timeframe] || 900;
+        const nowSec = Math.floor(Date.now() / 1000);
+        const currentPeriodStart = Math.floor(nowSec / stepSec) * stepSec;
+
+        let workingCandles = [...res.candles];
+        const last = workingCandles[workingCandles.length - 1];
+
+        // Ensure current active candle period is already present so chart starts at live tip
+        if (last && last.time < currentPeriodStart) {
+          let nextTime = last.time + stepSec;
+          while (nextTime <= currentPeriodStart && workingCandles.length < 3500) {
+            const prevClose = workingCandles[workingCandles.length - 1].close;
+            const p = nextTime === currentPeriodStart && res.price > 0 ? res.price : prevClose;
+            workingCandles.push({
+              time: nextTime,
+              open: prevClose,
+              high: Math.max(prevClose, p),
+              low: Math.min(prevClose, p),
+              close: p,
+              volume: 1,
+            });
+            nextTime += stepSec;
+          }
+        }
+
+        pairCandlesCache.current[symbol] = workingCandles;
+        setAllCandles(workingCandles);
+        allCandlesRef.current = workingCandles;
+        const startIdx = isReplayMode ? Math.max(30, workingCandles.length - 120) : workingCandles.length - 1;
         setReplayIndex(startIdx);
-        initDefaultBracket(res.candles[startIdx].close, tradeDirection, symbol);
-        setDiscoveredSetups(findAiTechniqueSetups(res.candles, symbol, timeframe));
+        replayIndexRef.current = startIdx;
+        initDefaultBracket(workingCandles[startIdx].close, tradeDirection, symbol);
+        setDiscoveredSetups(findAiTechniqueSetups(workingCandles, symbol, timeframe));
       }
     });
 

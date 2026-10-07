@@ -1,5 +1,5 @@
 import { SupportedSymbol, SupportedTimeframe } from '../config/brand';
-import { CandleData } from './marketEngine';
+import { CandleData, TIMEFRAME_SECONDS } from './marketEngine';
 
 export interface LiveMarketTick {
   symbol: SupportedSymbol;
@@ -316,22 +316,30 @@ class LiveMarketStreamerService {
     const spread = sym === 'BTC/USD' ? 3.5 : 0.18;
     const existing = this.latestTicks[sym];
 
-    const candle: CandleData = existing?.candle
-      ? {
-          ...existing.candle,
-          close: price,
-          high: Math.max(existing.candle.high, price),
-          low: Math.min(existing.candle.low, price),
-          volume: existing.candle.volume + 1,
-        }
-      : {
-          time: Math.floor(Date.now() / 1000),
-          open: price,
-          high: price,
-          low: price,
-          close: price,
-          volume: 50,
-        };
+    const stepSec = TIMEFRAME_SECONDS[this.currentTimeframe] || 900;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const candlePeriodTime = Math.floor(nowSec / stepSec) * stepSec;
+
+    let candle: CandleData;
+    if (existing?.candle && existing.candle.time === candlePeriodTime) {
+      candle = {
+        ...existing.candle,
+        close: price,
+        high: Math.max(existing.candle.high, price),
+        low: Math.min(existing.candle.low, price),
+        volume: existing.candle.volume + 1,
+      };
+    } else {
+      const prevClose = existing?.candle ? existing.candle.close : price;
+      candle = {
+        time: candlePeriodTime,
+        open: prevClose,
+        high: Math.max(prevClose, price),
+        low: Math.min(prevClose, price),
+        close: price,
+        volume: 1,
+      };
+    }
 
     const tick: LiveMarketTick = {
       symbol: sym,
