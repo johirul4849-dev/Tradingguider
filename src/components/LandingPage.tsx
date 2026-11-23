@@ -26,9 +26,8 @@ import {
   Flame,
   Check,
 } from 'lucide-react';
-import { BRAND_CONFIG } from '../config/brand';
+import { BRAND_CONFIG, SupportedSymbol, getMarketSessionStatus } from '../config/brand';
 import {
-  SUBSCRIPTION_PACKAGES,
   BINANCE_PAYMENT_CONFIG,
   subscriptionService,
 } from '../services/subscriptionService';
@@ -40,6 +39,18 @@ import { AdminPanelModal } from './AdminPanelModal';
 import hero3dImg from '../assets/images/hero_3d_glass_terminal_1791211140813.jpg';
 import bullionImg from '../assets/images/bullion_btc_3d_glass_1791211157383.jpg';
 import smcPrismImg from '../assets/images/smc_neural_prism_1791211169874.jpg';
+
+const SHOWCASE_SYMBOLS: SupportedSymbol[] = [
+  'EUR/USD',
+  'GBP/USD',
+  'USD/JPY',
+  'GBP/JPY',
+  'XAU/USD',
+  'XAG/USD',
+  'BTC/USD',
+];
+
+const TICKER_STRIP_SYMBOLS: SupportedSymbol[] = ['EUR/USD', 'GBP/USD', 'USD/JPY', 'XAU/USD', 'BTC/USD'];
 
 interface LandingPageProps {
   onGoogleLogin: () => Promise<void>;
@@ -53,23 +64,66 @@ export const LandingPage: React.FC<LandingPageProps> = ({
   authError,
 }) => {
   // Preview Chart State
-  const [previewSymbol, setPreviewSymbol] = useState<'BTC/USD' | 'XAU/USD'>('BTC/USD');
+  const [previewSymbol, setPreviewSymbol] = useState<SupportedSymbol>('EUR/USD');
   const [previewAiMarked, setPreviewAiMarked] = useState<boolean>(true);
+  const [sessionNow, setSessionNow] = useState<number>(() => Date.now());
 
-  // Live Original Market Prices for BTC/USD and XAU/USD
-  const [liveBtcTick, setLiveBtcTick] = useState<LiveMarketTick | null>(() =>
-    liveMarketStreamer.getLatestTick('BTC/USD')
-  );
-  const [liveGoldTick, setLiveGoldTick] = useState<LiveMarketTick | null>(() =>
-    liveMarketStreamer.getLatestTick('XAU/USD')
-  );
+  // Live ticks for showcase & ticker pairs
+  const [ticksBySymbol, setTicksBySymbol] = useState<Partial<Record<SupportedSymbol, LiveMarketTick>>>(() => ({
+    'EUR/USD': liveMarketStreamer.getLatestTick('EUR/USD'),
+    'GBP/USD': liveMarketStreamer.getLatestTick('GBP/USD'),
+    'USD/JPY': liveMarketStreamer.getLatestTick('USD/JPY'),
+    'GBP/JPY': liveMarketStreamer.getLatestTick('GBP/JPY'),
+    'XAU/USD': liveMarketStreamer.getLatestTick('XAU/USD'),
+    'XAG/USD': liveMarketStreamer.getLatestTick('XAG/USD'),
+    'BTC/USD': liveMarketStreamer.getLatestTick('BTC/USD'),
+  }));
 
   useEffect(() => {
+    const t = setInterval(() => setSessionNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    liveMarketStreamer.setSymbolAndTimeframe(previewSymbol, '15m');
     const unsub = liveMarketStreamer.subscribeTicks((tick) => {
-      if (tick.symbol === 'BTC/USD') setLiveBtcTick(tick);
-      if (tick.symbol === 'XAU/USD') setLiveGoldTick(tick);
+      setTicksBySymbol((prev) => ({ ...prev, [tick.symbol]: tick }));
     });
     return unsub;
+  }, [previewSymbol]);
+
+  useEffect(() => {
+    let active = true;
+    const refreshFeatured = async () => {
+      await Promise.all(
+        SHOWCASE_SYMBOLS.map(async (sym) => {
+          try {
+            const res = await fetch(`/api/market/ticker?symbol=${encodeURIComponent(sym)}`);
+            if (!res.ok || !active) return;
+            const d = await res.json();
+            if (d && d.price > 0) {
+              setTicksBySymbol((prev) => ({
+                ...prev,
+                [sym]: {
+                  ...(prev[sym] || liveMarketStreamer.getLatestTick(sym)),
+                  symbol: sym,
+                  price: d.price,
+                  change24hPct: typeof d.change24hPct === 'number' ? d.change24hPct : 0,
+                  marketOpen: d.marketOpen ?? getMarketSessionStatus(sym).isOpen,
+                  timestamp: Date.now(),
+                },
+              }));
+            }
+          } catch (_e) {}
+        })
+      );
+    };
+    refreshFeatured();
+    const poll = setInterval(refreshFeatured, 15000);
+    return () => {
+      active = false;
+      clearInterval(poll);
+    };
   }, []);
 
   // Modals
@@ -80,7 +134,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({
   const [calculatorPromoCode, setCalculatorPromoCode] = useState('');
   const [calcAppliedPromo, setCalcAppliedPromo] = useState<string | null>(null);
 
-  const isGold = previewSymbol === 'XAU/USD';
+  const previewMeta = BRAND_CONFIG.markets[previewSymbol] || BRAND_CONFIG.markets['EUR/USD'];
+  const previewTick = ticksBySymbol[previewSymbol];
+  const previewSession = getMarketSessionStatus(previewSymbol, sessionNow);
 
   const handleTestPromo = () => {
     if (!calculatorPromoCode.trim()) return;
@@ -92,13 +148,19 @@ export const LandingPage: React.FC<LandingPageProps> = ({
     }
   };
 
-  const currentPreviewPrice = isGold
-    ? liveGoldTick?.price
-      ? `$${liveGoldTick.price.toLocaleString('en-US', { minimumFractionDigits: 2 })}`
-      : '$4,145.50'
-    : liveBtcTick?.price
-    ? `$${liveBtcTick.price.toLocaleString('en-US', { minimumFractionDigits: 2 })}`
-    : '$85,950.00';
+  const formatMarketPrice = (sym: SupportedSymbol, rawPrice?: number) => {
+    const meta = BRAND_CONFIG.markets[sym];
+    const p = rawPrice && rawPrice > 0 ? rawPrice : meta.defaultPrice;
+    return p.toLocaleString('en-US', {
+      minimumFractionDigits: meta.decimals,
+      maximumFractionDigits: meta.decimals,
+    });
+  };
+
+  const currentPreviewPrice = `${previewMeta.category === 'Forex Major' || previewMeta.category === 'Forex Cross' ? '' : '$'}${formatMarketPrice(
+    previewSymbol,
+    previewTick?.price
+  )}`;
 
   return (
     <div className="min-h-screen bg-[#0A1022] text-slate-100 flex flex-col font-sans antialiased overflow-x-hidden selection:bg-[#2962FF] selection:text-white relative">
@@ -107,47 +169,54 @@ export const LandingPage: React.FC<LandingPageProps> = ({
       <div className="fixed top-1/2 -left-40 w-[600px] h-[600px] bg-gradient-to-r from-[#00E676]/10 to-transparent rounded-full blur-[160px] pointer-events-none -z-10" />
       <div className="fixed bottom-0 right-0 w-[700px] h-[500px] bg-gradient-to-l from-[#2962FF]/15 to-transparent rounded-full blur-[150px] pointer-events-none -z-10" />
 
-      {/* 1. TOP LIVE TICKER BAR (High-Contrast, Crystal Clear Text) */}
+      {/* 1. TOP LIVE TICKER BAR (High-Contrast, 28 Markets Forex + Metals + Crypto) */}
       <div className="bg-[#0E172E] border-b border-slate-700/80 px-4 py-2.5 text-xs relative z-50 shadow-sm">
         <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/20 text-[#00E676] border border-emerald-500/40 font-mono font-bold text-[11px] tracking-wider uppercase shadow-sm">
               <span className="w-2 h-2 rounded-full bg-[#00E676] animate-ping" />
-              LIVE TICKER ACTIVE
+              28 LIVE PAIRS ACTIVE
             </span>
-            <span className="text-slate-300 hidden sm:inline text-xs font-mono font-medium">
-              Zero-Latency Real Price Oracle · No API Key Needed
+            <span className="text-slate-300 hidden md:inline text-xs font-mono font-medium">
+              25 Forex Pairs + Gold + Silver + BTC/USD · Auto Session Sync
             </span>
           </div>
 
-          {/* Original Live Pairs Real-Time Quotes */}
-          <div className="flex items-center gap-6 text-xs font-mono">
-            <div className="flex items-center gap-2 bg-[#14203D] px-3 py-1 rounded-lg border border-slate-700">
-              <span className="text-white font-bold tracking-tight">BTC/USD</span>
-              <span className="text-[#00E676] font-bold tabular-nums">
-                {liveBtcTick?.price
-                  ? `$${liveBtcTick.price.toLocaleString('en-US', { minimumFractionDigits: 2 })}`
-                  : '$85,950.00'}
-              </span>
-              <span className="text-[10px] px-1.5 py-0.2 bg-emerald-500/20 text-[#00E676] rounded font-bold">
-                +{liveBtcTick?.change24hPct?.toFixed(2) || '0.95'}%
-              </span>
-            </div>
-
-            <div className="flex items-center gap-2 bg-[#14203D] px-3 py-1 rounded-lg border border-slate-700">
-              <span className="text-white font-bold tracking-tight">XAU/USD GOLD</span>
-              <span className="text-[#FFD700] font-bold tabular-nums">
-                {liveGoldTick?.price
-                  ? `$${liveGoldTick.price.toLocaleString('en-US', { minimumFractionDigits: 2 })}`
-                  : '$4,145.50'}
-              </span>
-              <span className="text-[10px] px-1.5 py-0.2 bg-amber-500/20 text-[#FFD700] rounded font-bold">
-                +{liveGoldTick?.change24hPct?.toFixed(2) || '0.45'}%
-              </span>
-            </div>
+          {/* Live Quotes Across Forex, Gold & BTC */}
+          <div className="flex flex-wrap items-center gap-2.5 sm:gap-3 text-xs font-mono">
+            {TICKER_STRIP_SYMBOLS.map((sym) => {
+              const t = ticksBySymbol[sym];
+              const sStatus = getMarketSessionStatus(sym, sessionNow);
+              const pct = t?.change24hPct ?? 0;
+              return (
+                <div
+                  key={sym}
+                  className="flex items-center gap-2 bg-[#14203D] px-2.5 py-1 rounded-lg border border-slate-700"
+                >
+                  <span className="text-white font-bold tracking-tight">{sym}</span>
+                  <span className={`${sStatus.isOpen ? 'text-[#00E676]' : 'text-amber-300'} font-bold tabular-nums`}>
+                    {formatMarketPrice(sym, t?.price)}
+                  </span>
+                  {sStatus.isOpen ? (
+                    <span
+                      className={`text-[10px] px-1.5 py-0.2 rounded font-bold ${
+                        pct >= 0 ? 'bg-emerald-500/20 text-[#00E676]' : 'bg-rose-500/20 text-rose-300'
+                      }`}
+                    >
+                      {pct >= 0 ? '+' : ''}
+                      {pct.toFixed(2)}%
+                    </span>
+                  ) : (
+                    <span className="text-[9px] px-1.5 py-0.2 bg-amber-500/20 text-amber-300 rounded font-bold">
+                      CLOSED
+                    </span>
+                  )}
+                </div>
+              );
+            })}
           </div>
 
-          <div className="hidden lg:flex items-center gap-2 text-xs">
+          <div className="hidden xl:flex items-center gap-2 text-xs">
             <span className="text-slate-200">
               Sign in with Google now to get <strong className="text-white font-bold underline decoration-[#00E5FF]">24 Hours Free Full Access</strong>
             </span>
@@ -192,7 +261,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               href="#pairs"
               className="px-3.5 py-2 rounded-xl text-white hover:text-[#00E5FF] bg-[#142345] hover:bg-[#1E3362] border border-slate-600/80 hover:border-[#00E5FF]/60 shadow-sm transition-all"
             >
-              Original Pairs (BTC & Gold)
+              28 Live Markets
             </a>
             <a
               href="#smc"
@@ -260,7 +329,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 TRADINGGUIDER v4.2
               </span>
               <span className="text-slate-400">·</span>
-              <span className="text-white font-medium">90 DAYS CONTINUOUS BAR REPLAY · BTC & GOLD</span>
+              <span className="text-white font-medium">28 LIVE PAIRS · 25 FOREX + GOLD + SILVER + BTC</span>
             </div>
           </div>
 
@@ -278,10 +347,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
             <p className="text-base sm:text-xl text-slate-200 max-w-3xl mx-auto leading-relaxed mb-8 font-normal">
               Why do 94% of retail traders blow their accounts? Because they test untested strategies live.
-              With <strong className="text-white font-bold">Tradingguider</strong>, rewind 90 days of original{' '}
-              <strong className="text-[#00E5FF]">BTC/USD</strong> and <strong className="text-[#FFD700]">XAU/USD Gold</strong> spot candles,
+              With <strong className="text-white font-bold">Tradingguider</strong>, rewind 90 days of live{' '}
+              <strong className="text-[#00E5FF]">25 Forex Pairs</strong>, <strong className="text-[#FFD700]">XAU/USD Gold &amp; Silver</strong>, and{' '}
+              <strong className="text-emerald-300">BTC/USD</strong> candles with auto-sync on market open/close,
               drag real Exness SL/TP brackets, and let institutional AI auto-mark{' '}
-              <strong className="text-white">Fair Value Gaps (FVG), BOS & confirmation candles</strong> on your chart.
+              <strong className="text-white">Fair Value Gaps (FVG), BOS &amp; confirmation candles</strong> on your chart.
             </p>
 
             {authError && (
@@ -328,11 +398,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               </span>
               <span className="flex items-center gap-1.5">
                 <CheckCircle2 className="w-4 h-4 text-[#00E676]" />
-                Original BTC & Gold Live Market Data
+                28 Live Pairs (25 Forex + Gold + Silver + BTC)
               </span>
               <span className="flex items-center gap-1.5">
                 <CheckCircle2 className="w-4 h-4 text-[#00E676]" />
-                Full 90-Day Bar Replay & SMC
+                Auto Freeze on Market Close &amp; Auto Resume
               </span>
               <span className="flex items-center gap-1.5">
                 <CheckCircle2 className="w-4 h-4 text-[#00E676]" />
@@ -345,41 +415,45 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           <div className="relative max-w-5xl mx-auto rounded-3xl p-2 sm:p-3 bg-[#111C38] border-2 border-slate-600/80 shadow-2xl overflow-hidden">
             {/* Top Interactive Controls Bar */}
             <div className="p-4 sm:p-5 flex flex-wrap items-center justify-between gap-4 border-b border-slate-700 bg-[#142244] rounded-2xl mb-2">
-              <div className="flex items-center gap-3">
-                <div className="flex gap-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex gap-1.5 mr-1">
                   <div className="w-3 h-3 rounded-full bg-rose-500" />
                   <div className="w-3 h-3 rounded-full bg-amber-500" />
                   <div className="w-3 h-3 rounded-full bg-emerald-500" />
                 </div>
-                <div className="h-4 w-[1px] bg-slate-600 mx-1" />
-                <button
-                  type="button"
-                  onClick={() => setPreviewSymbol('BTC/USD')}
-                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer ${
-                    !isGold
-                      ? 'bg-[#2962FF] text-white shadow-md'
-                      : 'bg-slate-800 text-slate-300 hover:text-white'
-                  }`}
-                >
-                  BTC/USD ({liveBtcTick?.price ? `$${liveBtcTick.price.toFixed(2)}` : '$85,950'})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPreviewSymbol('XAU/USD')}
-                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer ${
-                    isGold
-                      ? 'bg-[#FFD700] text-slate-950 shadow-md'
-                      : 'bg-slate-800 text-slate-300 hover:text-white'
-                  }`}
-                >
-                  XAU/USD GOLD ({liveGoldTick?.price ? `$${liveGoldTick.price.toFixed(2)}` : '$4,145.50'})
-                </button>
+                {SHOWCASE_SYMBOLS.map((sym) => {
+                  const active = previewSymbol === sym;
+                  const sTick = ticksBySymbol[sym];
+                  return (
+                    <button
+                      key={sym}
+                      type="button"
+                      onClick={() => setPreviewSymbol(sym)}
+                      className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold font-mono transition-all cursor-pointer ${
+                        active
+                          ? sym === 'XAU/USD'
+                            ? 'bg-[#FFD700] text-slate-950 shadow-md'
+                            : 'bg-[#2962FF] text-white shadow-md'
+                          : 'bg-slate-800 text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      {sym} ({formatMarketPrice(sym, sTick?.price)})
+                    </button>
+                  );
+                })}
               </div>
 
               <div className="flex items-center gap-3">
                 <div className="flex items-center gap-2 font-mono text-xs bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-700">
-                  <span className="w-2 h-2 rounded-full bg-[#00E676] animate-ping" />
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      previewSession.isOpen ? 'bg-[#00E676] animate-ping' : 'bg-[#F59E0B]'
+                    }`}
+                  />
                   <span className="text-white font-bold">{currentPreviewPrice}</span>
+                  {!previewSession.isOpen && (
+                    <span className="text-[10px] text-amber-300 font-bold">CLOSED</span>
+                  )}
                 </div>
                 <button
                   type="button"
@@ -424,7 +498,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                       Bullish FVG Retest + Liquidity Grab
                     </div>
                     <div className="text-[11px] font-mono text-slate-300 mt-1">
-                      Execution Entry: {isGold ? '$4,142.20' : '$85,820.00'} • Stop: -12 Pips
+                      {previewSymbol} Entry: {currentPreviewPrice} • Stop: -12 Pips
                     </div>
                   </div>
 
@@ -482,7 +556,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                       VERIFIED MARKET ORACLE
                     </span>
                     <span className="text-sm font-bold text-white">
-                      BTC/USD & XAU/USD Physical Gold Feeds
+                      25 Forex Pairs + Gold, Silver &amp; BTC/USD Live Feeds
                     </span>
                   </div>
                   <span className="px-3 py-1 rounded-full text-[10px] font-mono font-bold bg-emerald-500/20 text-[#00E676] border border-emerald-500/40">
@@ -496,11 +570,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             <div className="w-full lg:w-1/2">
               <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#131F3B] border border-blue-500/40 text-xs font-mono text-[#00E5FF] mb-4 font-bold">
                 <Radio className="w-3.5 h-3.5 text-[#00E5FF]" />
-                <span>// ORIGINAL MARKET ASSET SPECIFICATIONS</span>
+                <span>// 28 LIVE FOREX, METALS &amp; CRYPTO SPECIFICATIONS</span>
               </div>
 
               <h2 className="text-3xl sm:text-5xl font-black text-white tracking-tight leading-[1.08] mb-6 font-display">
-                ORIGINAL PAIRS ONLY.{' '}
+                ALL 28 LIVE PAIRS.{' '}
                 <span className="text-transparent bg-clip-text bg-gradient-to-r from-[#00E5FF] to-[#00E676]">
                   ZERO SYNTHETIC FAKES.
                 </span>
@@ -508,54 +582,53 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
               <p className="text-sm sm:text-base text-slate-200 leading-relaxed mb-8">
                 Most backtest simulators use synthetic random-walk mathematics that do not reflect true institutional order flow.
-                <strong className="text-white font-bold"> Tradingguider</strong> feeds genuine global market data.
-                Even when deployed on Vercel or cloud static hosting, our browser multi-source engine streams live ticks without requiring any API keys.
+                <strong className="text-white font-bold"> Tradingguider</strong> feeds genuine global FX, Metals, and Crypto market data with full historical candle depth—automatically pausing when the interbank Forex market closes on Friday 22:00 UTC and resuming live Sunday 22:00 UTC.
               </p>
 
               {/* Pair Spec Cards */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
                 <div className="p-5 rounded-2xl bg-[#131F3C] border-2 border-slate-700 hover:border-blue-500 transition-all shadow-md">
                   <div className="flex items-center justify-between mb-3">
-                    <span className="text-sm font-mono font-bold text-white">BTC/USD</span>
+                    <span className="text-sm font-mono font-bold text-white">25 FOREX PAIRS</span>
                     <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-500/20 text-[#00E5FF] font-bold">
-                      GLOBAL SPOT
+                      MAJORS &amp; CROSSES
                     </span>
                   </div>
                   <ul className="space-y-2 text-xs text-slate-300 font-medium">
                     <li className="flex items-center gap-2">
                       <CheckCircle2 className="w-3.5 h-3.5 text-[#00E676] shrink-0" />
-                      <span>Sub-second tick WebSocket streaming</span>
+                      <span>EUR/USD, GBP/USD, USD/JPY, GBP/JPY &amp; 21 more</span>
                     </li>
                     <li className="flex items-center gap-2">
                       <CheckCircle2 className="w-3.5 h-3.5 text-[#00E676] shrink-0" />
-                      <span>90 days of 1m, 5m, 15m, 1H bars</span>
+                      <span>Previous candle history across 1m–1D timeframes</span>
                     </li>
                     <li className="flex items-center gap-2">
                       <CheckCircle2 className="w-3.5 h-3.5 text-[#00E676] shrink-0" />
-                      <span>Real weekend price action</span>
+                      <span>Auto freeze on weekend close &amp; auto reopen</span>
                     </li>
                   </ul>
                 </div>
 
                 <div className="p-5 rounded-2xl bg-[#131F3C] border-2 border-slate-700 hover:border-amber-500 transition-all shadow-md">
                   <div className="flex items-center justify-between mb-3">
-                    <span className="text-sm font-mono font-bold text-[#FFD700]">XAU/USD GOLD</span>
+                    <span className="text-sm font-mono font-bold text-[#FFD700]">GOLD, SILVER &amp; BTC</span>
                     <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/20 text-[#FFD700] font-bold">
-                      COMEX / LONDON
+                      METALS + 24/7 CRYPTO
                     </span>
                   </div>
                   <ul className="space-y-2 text-xs text-slate-300 font-medium">
                     <li className="flex items-center gap-2">
                       <CheckCircle2 className="w-3.5 h-3.5 text-[#FFD700] shrink-0" />
-                      <span>1:1 Physically backed spot calibration</span>
+                      <span>XAU/USD Gold, XAG/USD Silver &amp; 24/7 BTC/USD</span>
                     </li>
                     <li className="flex items-center gap-2">
                       <CheckCircle2 className="w-3.5 h-3.5 text-[#FFD700] shrink-0" />
-                      <span>London & NY session liquidity sweeps</span>
+                      <span>Real-time candle countdown auto-rollover</span>
                     </li>
                     <li className="flex items-center gap-2">
                       <CheckCircle2 className="w-3.5 h-3.5 text-[#FFD700] shrink-0" />
-                      <span>Exness pip and contract formulas</span>
+                      <span>Exness pip, spread &amp; contract sizing formulas</span>
                     </li>
                   </ul>
                 </div>
@@ -733,7 +806,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 <ul className="space-y-3 text-xs text-slate-200 mb-8">
                   <li className="flex items-center gap-2">
                     <CheckCircle2 className="w-4 h-4 text-[#00E676] shrink-0" />
-                    <span>90 Days Bar Replay (BTC & Gold)</span>
+                    <span>28 Live Pairs &amp; 90-Day Bar Replay</span>
                   </li>
                   <li className="flex items-center gap-2">
                     <CheckCircle2 className="w-4 h-4 text-[#00E676] shrink-0" />
@@ -993,7 +1066,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         <div className="max-w-[1440px] mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2">
             <span className="font-bold text-white font-mono">{BRAND_CONFIG.name}</span>
-            <span>— 3-Month Bar Replay & AI Chart Mentor for BTC/USD & XAU/USD Gold.</span>
+            <span>— 28-Pair Live Market Replay &amp; AI Chart Mentor (25 Forex Pairs, Gold, Silver &amp; BTC/USD).</span>
           </div>
 
           <div className="flex items-center gap-4">

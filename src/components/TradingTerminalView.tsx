@@ -31,7 +31,14 @@ import {
   BookOpen,
   Lock,
 } from 'lucide-react';
-import { SupportedSymbol, SupportedTimeframe, BRAND_CONFIG } from '../config/brand';
+import {
+  SupportedSymbol,
+  SupportedTimeframe,
+  BRAND_CONFIG,
+  ALL_SUPPORTED_SYMBOLS,
+  MARKET_CATEGORIES,
+  getMarketSessionStatus,
+} from '../config/brand';
 import {
   CandleData,
   DEFAULT_INDICATORS,
@@ -46,13 +53,14 @@ import {
   HistoricalTradeLesson,
   getHistoricalTradeLessons,
 } from '../services/marketEngine';
-import { liveMarketStreamer, LiveStreamStatus, LiveMarketTick } from '../services/liveMarketStreamer';
+import { liveMarketStreamer, LiveStreamStatus } from '../services/liveMarketStreamer';
 import { TradingChart, ChartVisualType, AiAutoMarkOverlay, DraftOrderBracket } from './TradingChart';
 import { UserProfileData, SimulatedTradeRecord, DisciplineEventRecord } from '../lib/firebase';
 import {
   UserSubscriptionRecord,
   SUBSCRIPTION_PACKAGES,
   calculateRemainingCountdown,
+  hasActiveAccess,
 } from '../services/subscriptionService';
 import { AiChartTeacherModal } from './AiChartTeacherModal';
 import { UserProfileModal } from './UserProfileModal';
@@ -138,7 +146,11 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
   onOpenSubscriptionModal,
 }) => {
   const initialSymbol: SupportedSymbol =
-    profile.preferredMarket === 'XAU/USD' ? 'XAU/USD' : 'BTC/USD';
+    profile.preferredMarket &&
+    profile.preferredMarket !== 'BOTH' &&
+    BRAND_CONFIG.markets[profile.preferredMarket as SupportedSymbol]
+      ? (profile.preferredMarket as SupportedSymbol)
+      : 'EUR/USD';
   const [symbol, setSymbol] = useState<SupportedSymbol>(initialSymbol);
   const [timeframe, setTimeframe] = useState<SupportedTimeframe>(profile.preferredTimeframe || '15m');
   const [chartType, setChartType] = useState<ChartVisualType>('candlestick');
@@ -146,11 +158,13 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
   const [showIndicatorModal, setShowIndicatorModal] = useState(false);
   const [indicatorSearch, setIndicatorSearch] = useState('');
   const [showUserProfileModal, setShowUserProfileModal] = useState(false);
+  const [showPairSelectorModal, setShowPairSelectorModal] = useState(false);
+  const [pairSearchQuery, setPairSearchQuery] = useState('');
 
   // AI Language Selection (Defaults to Bengali 'bn')
   const [aiLanguage, setAiLanguage] = useState<AiCoachLanguage>('bn');
 
-  // Real-time ticking clock for header subscription countdown
+  // Real-time ticking clock for header subscription countdown & FX market open/close watch
   const [termCurrentTime, setTermCurrentTime] = useState<number>(Date.now());
   useEffect(() => {
     const t = setInterval(() => setTermCurrentTime(Date.now()), 1000);
@@ -160,19 +174,26 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
   // Full-Window / Fullscreen Chart State
   const [isFullWindowChart, setIsFullWindowChart] = useState<boolean>(false);
 
-  // In-memory stable cache for pairs so pairs NEVER disappear or reset!
-  const pairCandlesCache = useRef<Record<SupportedSymbol, CandleData[]>>({
-    'BTC/USD': MarketDataProvider.getThreeMonthCandles('BTC/USD', profile.preferredTimeframe || '15m', 1500),
-    'XAU/USD': MarketDataProvider.getThreeMonthCandles('XAU/USD', profile.preferredTimeframe || '15m', 1500),
+  // Lazy in-memory stable cache for all 28 pairs so switching pairs is instant
+  const pairCandlesCache = useRef<Partial<Record<SupportedSymbol, CandleData[]>>>({
+    [initialSymbol]: MarketDataProvider.getThreeMonthCandles(
+      initialSymbol,
+      profile.preferredTimeframe || '15m',
+      1500
+    ),
   });
 
   // 3-Month Historical + Live Candles
-  const [allCandles, setAllCandles] = useState<CandleData[]>(() => pairCandlesCache.current[initialSymbol]);
+  const [allCandles, setAllCandles] = useState<CandleData[]>(
+    () => pairCandlesCache.current[initialSymbol]!
+  );
 
   // TradingView Bar Replay State (Default to FALSE = 100% REAL LIVE MARKET STREAM)
   const [isReplayMode, setIsReplayMode] = useState<boolean>(false);
   const [isReplayCutMode, setIsReplayCutMode] = useState<boolean>(false);
-  const [replayIndex, setReplayIndex] = useState<number>(() => pairCandlesCache.current[initialSymbol].length - 1);
+  const [replayIndex, setReplayIndex] = useState<number>(
+    () => (pairCandlesCache.current[initialSymbol]?.length || 1) - 1
+  );
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [replaySpeed, setReplaySpeed] = useState<number>(1);
 
@@ -213,7 +234,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
   const [strategyLabCategory, setStrategyLabCategory] = useState<string>('ALL');
   const [isScanningNewMethods, setIsScanningNewMethods] = useState<boolean>(false);
   const [discoveredSetups, setDiscoveredSetups] = useState<AiTechniqueSetup[]>(() =>
-    findAiTechniqueSetups(pairCandlesCache.current[initialSymbol], initialSymbol, '15m')
+    findAiTechniqueSetups(pairCandlesCache.current[initialSymbol]!, initialSymbol, '15m')
   );
 
   // AI Smart Live Prediction Scanner & 10-Second Auto-Execution
@@ -261,6 +282,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
 
   const symbolMeta = BRAND_CONFIG.markets[symbol] || BRAND_CONFIG.markets['BTC/USD'];
   const decimals = symbolMeta.decimals;
+  const sessionStatus = getMarketSessionStatus(symbol, termCurrentTime);
 
   const visibleCandles = isReplayMode
     ? allCandles.slice(0, Math.max(25, Math.min(replayIndex + 1, allCandles.length)))
@@ -276,7 +298,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
   };
 
   const currentPrice = currentCandle.close;
-  const halfSpread = symbol === 'BTC/USD' ? 4.0 : 0.18;
+  const halfSpread = symbolMeta.typicalSpread / 2;
   const bidPrice = Number((currentPrice - halfSpread).toFixed(decimals));
   const askPrice = Number((currentPrice + halfSpread).toFixed(decimals));
 
@@ -290,15 +312,18 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
   };
 
   const getContractUnits = (sym: SupportedSymbol, lots: number) => {
-    return sym === 'XAU/USD' ? lots * 10 : lots;
+    const meta = BRAND_CONFIG.markets[sym];
+    return lots * (meta?.contractUnitsMultiplier || 1);
   };
 
   // Initialize Default Stop Loss and Take Profit
   const initDefaultBracket = (basePrice: number, dir: 'LONG' | 'SHORT', sym: SupportedSymbol) => {
-    const dist = sym === 'BTC/USD' ? 360 : 6.0;
-    const sl = Number((dir === 'LONG' ? basePrice - dist : basePrice + dist).toFixed(decimals));
-    const tp = Number((dir === 'LONG' ? basePrice + dist * 3.0 : basePrice - dist * 3.0).toFixed(decimals));
-    setPendingEntryPrice(Number(basePrice.toFixed(decimals)));
+    const meta = BRAND_CONFIG.markets[sym] || BRAND_CONFIG.markets['BTC/USD'];
+    const dec = meta.decimals;
+    const dist = meta.defaultBracketDistance;
+    const sl = Number((dir === 'LONG' ? basePrice - dist : basePrice + dist).toFixed(dec));
+    const tp = Number((dir === 'LONG' ? basePrice + dist * 3.0 : basePrice - dist * 3.0).toFixed(dec));
+    setPendingEntryPrice(Number(basePrice.toFixed(dec)));
     setStopLossPrice(sl);
     setTakeProfitPrice(tp);
   };
@@ -306,7 +331,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
   // Start Exness-Style Draft Order Setup (Order Preview on Chart)
   const handleStartDraftOrder = (dir: 'LONG' | 'SHORT') => {
     const basePrice = dir === 'LONG' ? askPrice : bidPrice;
-    const defaultDist = symbol === 'BTC/USD' ? 360 : 6.0;
+    const defaultDist = symbolMeta.defaultBracketDistance;
     const sl = Number((dir === 'LONG' ? basePrice - defaultDist : basePrice + defaultDist).toFixed(decimals));
     const tp = Number((dir === 'LONG' ? basePrice + defaultDist * 3.0 : basePrice - defaultDist * 3.0).toFixed(decimals));
 
@@ -405,7 +430,15 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
       }
     });
 
-    showToast(`Switched to ${newSymbol === 'XAU/USD' ? 'XAU/USD Gold' : 'BTC/USD'} (Sub-Second Live Stream Connected)`, 'emerald');
+    setShowPairSelectorModal(false);
+    const nextMeta = BRAND_CONFIG.markets[newSymbol];
+    const nextSession = getMarketSessionStatus(newSymbol);
+    showToast(
+      nextSession.isOpen
+        ? `Switched to ${newSymbol} (${nextMeta.name}) — Live Stream Connected`
+        : `${newSymbol} Market Closed (${nextSession.countdownText}) — Chart Frozen at Last Close`,
+      nextSession.isOpen ? 'emerald' : 'blue'
+    );
   };
 
   // Sub-Second Live WebSocket Streamer Subscription
@@ -425,6 +458,8 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
 
     const unsubTicks = liveMarketStreamer.subscribeTicks((tick) => {
       if (tick.symbol !== symbol) return;
+      // Freeze pair at its last close when market is closed (Fri 22:00 UTC -> Sun 22:00 UTC)
+      if (!tick.marketOpen || !getMarketSessionStatus(symbol).isOpen) return;
 
       // Pulse color flash on micro-tick
       if (prevPriceRef.current > 0 && tick.price !== prevPriceRef.current) {
@@ -491,53 +526,54 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
   }, [symbol, timeframe]);
 
   // Auto-roll new candle immediately when candle timer countdown reaches 00:00
-  // (Guarantees auto-countdown resets and auto new candle forms without needing to change timeframe)
+  // (Respects Market Open/Close freeze so weekend markets don't print fake candles)
+  const checkAndRollNewCandle = useCallback(() => {
+    if (isReplayModeRef.current) return;
+    if (!getMarketSessionStatus(symbol).isOpen) return;
+
+    const stepSec = TIMEFRAME_SECONDS[timeframe] || 900;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const currentPeriodStart = Math.floor(nowSec / stepSec) * stepSec;
+
+    setAllCandles((prev) => {
+      if (!prev || prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      if (!last) return prev;
+
+      if (last.time < currentPeriodStart) {
+        const copy = [...prev];
+        const currentP = prevPriceRef.current > 0 ? prevPriceRef.current : last.close;
+        let nextTime = last.time + stepSec;
+
+        while (nextTime <= currentPeriodStart && copy.length < 3500) {
+          const prevClose = copy[copy.length - 1].close;
+          const p = nextTime === currentPeriodStart ? currentP : prevClose;
+          copy.push({
+            time: nextTime,
+            open: prevClose,
+            high: Math.max(prevClose, p),
+            low: Math.min(prevClose, p),
+            close: p,
+            volume: 1,
+          });
+          nextTime += stepSec;
+        }
+        pairCandlesCache.current[symbol] = copy;
+        allCandlesRef.current = copy;
+        setReplayIndex(copy.length - 1);
+        replayIndexRef.current = copy.length - 1;
+        return copy;
+      }
+      return prev;
+    });
+  }, [timeframe, symbol]);
+
   useEffect(() => {
     if (isReplayMode) return;
-
-    const checkAndRollNewCandle = () => {
-      const stepSec = TIMEFRAME_SECONDS[timeframe] || 900;
-      const nowSec = Math.floor(Date.now() / 1000);
-      const currentPeriodStart = Math.floor(nowSec / stepSec) * stepSec;
-
-      setAllCandles((prev) => {
-        if (!prev || prev.length === 0) return prev;
-        const last = prev[prev.length - 1];
-        if (!last) return prev;
-
-        // When current candle close time has arrived or passed
-        if (last.time < currentPeriodStart) {
-          const copy = [...prev];
-          const currentP = prevPriceRef.current > 0 ? prevPriceRef.current : last.close;
-          let nextTime = last.time + stepSec;
-
-          while (nextTime <= currentPeriodStart && copy.length < 3500) {
-            const prevClose = copy[copy.length - 1].close;
-            const p = nextTime === currentPeriodStart ? currentP : prevClose;
-            copy.push({
-              time: nextTime,
-              open: prevClose,
-              high: Math.max(prevClose, p),
-              low: Math.min(prevClose, p),
-              close: p,
-              volume: 1,
-            });
-            nextTime += stepSec;
-          }
-          pairCandlesCache.current[symbol] = copy;
-          allCandlesRef.current = copy;
-          setReplayIndex(copy.length - 1);
-          replayIndexRef.current = copy.length - 1;
-          return copy;
-        }
-        return prev;
-      });
-    };
-
     checkAndRollNewCandle();
     const timer = setInterval(checkAndRollNewCandle, 1000);
     return () => clearInterval(timer);
-  }, [timeframe, symbol, isReplayMode]);
+  }, [checkAndRollNewCandle, isReplayMode]);
 
   // Initial / Pair-Change Data Fetch on Mount or Symbol/Timeframe Change
   useEffect(() => {
@@ -552,8 +588,8 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
         let workingCandles = [...res.candles];
         const last = workingCandles[workingCandles.length - 1];
 
-        // Ensure current active candle period is already present so chart starts at live tip
-        if (last && last.time < currentPeriodStart) {
+        // Only pad to current active candle period if market is currently OPEN
+        if (getMarketSessionStatus(symbol).isOpen && last && last.time < currentPeriodStart) {
           let nextTime = last.time + stepSec;
           while (nextTime <= currentPeriodStart && workingCandles.length < 3500) {
             const prevClose = workingCandles[workingCandles.length - 1].close;
@@ -568,6 +604,10 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
             });
             nextTime += stepSec;
           }
+        }
+
+        if (res.price > 0) {
+          prevPriceRef.current = res.price;
         }
 
         pairCandlesCache.current[symbol] = workingCandles;
@@ -585,6 +625,36 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
       mounted = false;
     };
   }, [symbol, timeframe]);
+
+  // Auto-resume streaming & history sync when closed FX/Metals market reopens (Sun 22:00 UTC)
+  const wasOpenRef = useRef<boolean>(getMarketSessionStatus(symbol).isOpen);
+  useEffect(() => {
+    wasOpenRef.current = getMarketSessionStatus(symbol).isOpen;
+  }, [symbol]);
+
+  useEffect(() => {
+    const nowOpen = sessionStatus.isOpen;
+    if (!wasOpenRef.current && nowOpen) {
+      wasOpenRef.current = true;
+      liveMarketStreamer.setSymbolAndTimeframe(symbol, timeframe);
+      MarketDataProvider.fetchThreeMonthHistoryAndLive(symbol, timeframe).then((res) => {
+        if (activeSymbolRef.current !== symbol) return;
+        if (res.candles && res.candles.length >= 30) {
+          pairCandlesCache.current[symbol] = res.candles;
+          setAllCandles(res.candles);
+          allCandlesRef.current = res.candles;
+          if (!isReplayModeRef.current) {
+            setReplayIndex(res.candles.length - 1);
+            replayIndexRef.current = res.candles.length - 1;
+          }
+        }
+      });
+      showToast(`${symbol} Market Opened — Live Data Auto-Resumed!`, 'emerald');
+    } else if (wasOpenRef.current && !nowOpen) {
+      wasOpenRef.current = false;
+      showToast(`${symbol} Market Closed (${sessionStatus.countdownText})`, 'blue');
+    }
+  }, [sessionStatus.isOpen, symbol, timeframe]);
 
   // Keyboard Shortcuts: Spacebar = Play/Pause, Right Arrow = +1 Bar
   useEffect(() => {
@@ -766,7 +836,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
         : bidPrice
       : pendingEntryPrice || currentPrice;
 
-    const defaultDist = symbol === 'BTC/USD' ? 360 : 6.0;
+    const defaultDist = symbolMeta.defaultBracketDistance;
     let sl = customSl
       ? Number(customSl.toFixed(decimals))
       : customSetup
@@ -944,7 +1014,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
     const isLong = pos.direction === 'LONG';
     const rawDiff = isLong ? exitPrice - pos.entryPrice : pos.entryPrice - exitPrice;
     const pnl = Number((rawDiff * pos.units).toFixed(2));
-    const slDist = Math.max(0.0001, Math.abs(pos.entryPrice - pos.stopLoss));
+    const slDist = Math.max(symbolMeta.tickSize, Math.abs(pos.entryPrice - pos.stopLoss));
     const rMultiple = Number((rawDiff / slDist).toFixed(2));
 
     const mfeP = finalMfePrice ?? pos.mfePrice;
@@ -1158,7 +1228,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
 
   const livePositionR = (() => {
     if (!activePosition || activePosition.status !== 'OPEN') return 0;
-    const slDist = Math.max(0.0001, Math.abs(activePosition.entryPrice - activePosition.stopLoss));
+    const slDist = Math.max(symbolMeta.tickSize, Math.abs(activePosition.entryPrice - activePosition.stopLoss));
     const diff =
       activePosition.direction === 'LONG'
         ? currentPrice - activePosition.entryPrice
@@ -1198,46 +1268,73 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
       {/* 1. COMPACT TRADINGVIEW TOP BAR */}
       <header className="h-[42px] shrink-0 bg-[#131722] border-b border-[#2A2E39] px-2 flex items-center justify-between gap-1 overflow-x-auto">
         <div className="flex items-center gap-1 shrink-0">
-          {/* Real Pair Selector (Guaranteed never disappears) */}
+          {/* All 28 Pairs Selector + Quick Favorites */}
           <div className="flex items-center gap-1 pr-2 border-r border-[#2A2E39]">
-            {(['BTC/USD', 'XAU/USD'] as SupportedSymbol[]).map((sym) => {
-              const active = symbol === sym;
-              return (
-                <button
-                  key={sym}
-                  type="button"
-                  onClick={() => handleSelectSymbol(sym)}
-                  className={`px-2.5 py-1 rounded text-xs font-bold font-mono flex items-center gap-1.5 transition-all cursor-pointer ${
-                    active
-                      ? 'bg-[#2962FF] text-white shadow-md shadow-[#2962FF]/30'
-                      : 'text-[#B2B5BE] hover:bg-[#2A2E39] hover:text-white'
-                  }`}
-                >
-                  <span className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-[#00E676]' : 'bg-[#787B86]'}`} />
-                  <span>{sym === 'XAU/USD' ? 'XAU/USD GOLD' : 'BTC/USD'}</span>
-                </button>
-              );
-            })}
+            <button
+              type="button"
+              onClick={() => setShowPairSelectorModal(true)}
+              className="px-2.5 py-1 rounded bg-[#2962FF] hover:bg-[#1E53E5] text-white text-xs font-bold font-mono flex items-center gap-1.5 transition-all cursor-pointer shadow-md shadow-[#2962FF]/30"
+              title="Browse all 28 Forex, Metals & Crypto pairs"
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${sessionStatus.isOpen ? 'bg-[#00E676]' : 'bg-[#F59E0B]'}`} />
+              <span>{symbol}</span>
+              <span className="text-[9px] px-1 rounded bg-black/25 text-white/90">28</span>
+              <ChevronDown className="w-3.5 h-3.5 opacity-80" />
+            </button>
+
+            <div className="hidden xl:flex items-center gap-0.5">
+              {(['EUR/USD', 'GBP/USD', 'USD/JPY', 'XAU/USD', 'BTC/USD'] as SupportedSymbol[]).map((sym) => {
+                if (sym === symbol) return null;
+                return (
+                  <button
+                    key={sym}
+                    type="button"
+                    onClick={() => handleSelectSymbol(sym)}
+                    className="px-2 py-1 rounded text-[11px] font-bold font-mono text-[#B2B5BE] hover:bg-[#2A2E39] hover:text-white transition-colors cursor-pointer"
+                  >
+                    {sym}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
-          {/* Sub-Second Live WebSocket Stream Indicator */}
+          {/* Sub-Second Live Stream or Market Closed Freeze Indicator */}
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#181C27] border border-[#2A2E39] font-mono text-xs shadow-inner">
             <span
               className={`w-2.5 h-2.5 rounded-full ${
-                liveWsStatus === 'CONNECTED' ? 'bg-[#00E676] animate-pulse ring-2 ring-[#00E676]/40' : 'bg-[#FF9100]'
+                !sessionStatus.isOpen
+                  ? 'bg-[#F59E0B]'
+                  : liveWsStatus === 'CONNECTED'
+                  ? 'bg-[#00E676] animate-pulse ring-2 ring-[#00E676]/40'
+                  : 'bg-[#FF9100]'
               }`}
             />
             <span className="text-[#94A3B8] text-[10px] hidden sm:inline">
-              {symbol === 'XAU/USD' ? '⚡ COMEX GOLD LIVE:' : '⚡ BINANCE BTC LIVE:'}
+              {!sessionStatus.isOpen ? `${symbol} CLOSED:` : `${symbol} LIVE:`}
             </span>
             <span
               className={`font-extrabold font-mono transition-colors duration-150 text-xs sm:text-sm ${
-                livePriceFlash === 'up' ? 'text-[#00E676]' : livePriceFlash === 'down' ? 'text-[#F23645]' : 'text-white'
+                !sessionStatus.isOpen
+                  ? 'text-amber-300'
+                  : livePriceFlash === 'up'
+                  ? 'text-[#00E676]'
+                  : livePriceFlash === 'down'
+                  ? 'text-[#F23645]'
+                  : 'text-white'
               }`}
             >
               {currentPrice.toFixed(decimals)}
             </span>
-            <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-[9px] text-[#00E676] font-bold">REALTIME</span>
+            {sessionStatus.isOpen ? (
+              <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-[9px] text-[#00E676] font-bold">
+                REALTIME
+              </span>
+            ) : (
+              <span className="px-1.5 py-0.2 rounded bg-amber-500/20 text-[9px] text-amber-300 font-bold">
+                {sessionStatus.countdownText}
+              </span>
+            )}
           </div>
 
           {/* Timeframe Selector */}
@@ -1477,59 +1574,102 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
 
       {/* 2. UNIFIED REAL CHART WORKSPACE */}
       <div className="flex-1 flex min-h-0 overflow-hidden relative">
-        {/* Automatic Package Purchase Locked Barrier if 24h trial or package ended */}
-        {userSubscription?.status === 'TRIAL_EXPIRED' && (
-          <div className="absolute inset-0 z-40 bg-[#0A1022]/85 backdrop-blur-md flex items-center justify-center p-4">
-            <div className="max-w-md w-full bg-[#131722] border-2 border-rose-500/60 rounded-2xl p-6 sm:p-8 shadow-2xl text-center space-y-4">
-              <div className="w-14 h-14 rounded-2xl bg-rose-500/20 border border-rose-500/40 text-rose-400 flex items-center justify-center mx-auto shadow-lg">
-                <Lock className="w-7 h-7" />
-              </div>
-              <div>
-                <h3 className="text-xl font-black text-white font-display">
-                  24-Hour Free Access Ended
-                </h3>
-                <p className="text-xs text-slate-300 mt-2 leading-relaxed">
-                  Your 24 hours of free trading practice have expired.
-                  To continue practicing with live charts, bar replay, and AI SMC mentorship, please activate a subscription package below.
-                </p>
-              </div>
-
-              <div className="p-3.5 rounded-xl bg-[#0C1222] border border-slate-700 text-left space-y-1.5 text-xs">
-                <div className="flex justify-between text-slate-300 font-medium">
-                  <span>1 Month Pro Pass:</span>
-                  <span className="font-mono text-[#00E676] font-bold">$7 / $8 USDT</span>
-                </div>
-                <div className="flex justify-between text-slate-300 font-medium">
-                  <span>6 Months Mastery (Popular):</span>
-                  <span className="font-mono text-[#00E676] font-bold">$35 / $40 USDT</span>
-                </div>
-                <div className="flex justify-between text-slate-300 font-medium">
-                  <span>12 Months Elite Trader:</span>
-                  <span className="font-mono text-[#00E676] font-bold">$62 / $70 USDT</span>
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-2.5 pt-2">
-                <button
-                  type="button"
-                  onClick={onOpenSubscriptionModal}
-                  className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#2962FF] to-[#00E5FF] text-white font-black text-xs uppercase tracking-wider shadow-lg hover:opacity-95 transition-all cursor-pointer"
-                >
-                  Purchase Package to Continue Practice
-                </button>
-                {onSignOut && (
-                  <button
-                    type="button"
-                    onClick={onSignOut}
-                    className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition-colors cursor-pointer"
+        {/* Automatic Package Purchase / Admin Approval Locked Barrier when 24h trial or package expired */}
+        {userSubscription && !hasActiveAccess(userSubscription, termCurrentTime) && (() => {
+          const isPendingApproval = userSubscription.status === 'PENDING_APPROVAL';
+          return (
+            <div className="absolute inset-0 z-40 bg-[#0A1022]/90 backdrop-blur-md flex items-center justify-center p-4">
+              <div
+                className={`max-w-md w-full max-h-[90vh] bg-[#131722] border-2 ${
+                  isPendingApproval ? 'border-amber-500/60' : 'border-rose-500/60'
+                } rounded-2xl shadow-2xl flex flex-col overflow-hidden text-center`}
+              >
+                <div className="p-6 sm:p-7 overflow-y-auto overscroll-contain space-y-4">
+                  <div
+                    className={`w-14 h-14 rounded-2xl ${
+                      isPendingApproval
+                        ? 'bg-amber-500/20 border border-amber-500/40 text-amber-400'
+                        : 'bg-rose-500/20 border border-rose-500/40 text-rose-400'
+                    } flex items-center justify-center mx-auto shadow-lg`}
                   >
-                    Log Out of Account
-                  </button>
-                )}
+                    <Lock className="w-7 h-7" />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-black text-white font-display">
+                      {isPendingApproval
+                        ? 'Payment Verification Pending Admin Approval'
+                        : userSubscription.activePackageId
+                        ? 'Subscription Package Expired'
+                        : '24-Hour Free Access Ended'}
+                    </h3>
+                    <p className="text-xs text-slate-300 mt-2 leading-relaxed">
+                      {isPendingApproval
+                        ? `Your Binance payment request (TxID: ${
+                            userSubscription.lastPaymentSubmission?.binanceTxId || 'Submitted'
+                          }) has been received and is awaiting Admin verification. Your account remains locked until the Admin approves it.`
+                        : 'Your free practice window or active subscription has expired. Submit a Binance payment request for Admin approval to reactivate all 28 live markets & replay tools.'}
+                    </p>
+                  </div>
+
+                  {isPendingApproval ? (
+                    <div className="p-3.5 rounded-xl bg-amber-950/30 border border-amber-500/40 text-left space-y-1.5 text-xs font-mono">
+                      <div className="flex justify-between text-slate-300">
+                        <span>Selected Package:</span>
+                        <span className="text-white font-bold">
+                          {userSubscription.lastPaymentSubmission?.packageId || 'Pro Pass'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-slate-300">
+                        <span>Amount Submitted:</span>
+                        <span className="text-[#00E676] font-bold">
+                          ${userSubscription.lastPaymentSubmission?.amountPaid || 0} USDT
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-slate-300">
+                        <span>Status:</span>
+                        <span className="text-amber-300 font-bold">Awaiting Admin Approval</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-3.5 rounded-xl bg-[#0C1222] border border-slate-700 text-left space-y-1.5 text-xs">
+                      <div className="flex justify-between text-slate-300 font-medium">
+                        <span>1 Month Pro Pass:</span>
+                        <span className="font-mono text-[#00E676] font-bold">$7 / $8 USDT</span>
+                      </div>
+                      <div className="flex justify-between text-slate-300 font-medium">
+                        <span>6 Months Mastery (Popular):</span>
+                        <span className="font-mono text-[#00E676] font-bold">$35 / $40 USDT</span>
+                      </div>
+                      <div className="flex justify-between text-slate-300 font-medium">
+                        <span>12 Months Elite Trader:</span>
+                        <span className="font-mono text-[#00E676] font-bold">$62 / $70 USDT</span>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex flex-col gap-2.5 pt-2">
+                    <button
+                      type="button"
+                      onClick={onOpenSubscriptionModal}
+                      className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#2962FF] to-[#00E5FF] text-white font-black text-xs uppercase tracking-wider shadow-lg hover:opacity-95 transition-all cursor-pointer"
+                    >
+                      {isPendingApproval ? 'View / Resubmit Payment Details' : 'Submit Payment Request to Activate'}
+                    </button>
+                    {onSignOut && (
+                      <button
+                        type="button"
+                        onClick={onSignOut}
+                        className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition-colors cursor-pointer"
+                      >
+                        Log Out / Switch Account
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         <div className="flex-1 flex flex-col min-w-0 h-full relative">
           <div className="flex-1 relative min-h-0">
@@ -1619,65 +1759,78 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
                 setInspectedCandleSymptom(s);
                 setIsTeacherModalOpen(true);
               }}
+              onCandleTimerElapsed={checkAndRollNewCandle}
             />
 
             {/* AI SMART PREDICTION 10-SECOND RADAR ALERT MODAL */}
             {aiPredictionAlert && (
-              <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 w-[420px] max-w-[92vw] bg-[#1E222D]/98 border-2 border-[#00E676] rounded-2xl p-4 shadow-2xl backdrop-blur-xl animate-bounce-subtle select-none">
-                <div className="flex items-center justify-between border-b border-[#2A2E39] pb-2 mb-2.5">
-                  <div className="flex items-center gap-2">
-                    <span className="w-3 h-3 rounded-full bg-[#00E676] animate-ping" />
-                    <span className="font-extrabold text-white text-xs tracking-wider uppercase">
-                      ⚡ AI High-Confluence Prediction
-                    </span>
-                  </div>
-                  <div className="px-2.5 py-1 rounded bg-[#00E676]/20 text-[#00E676] font-mono font-bold text-xs">
-                    00:{predictionCountdown.toString().padStart(2, '0')}
-                  </div>
-                </div>
-
-                <div className="space-y-2 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span
-                      className={`px-2 py-0.5 rounded font-mono font-extrabold text-xs text-white ${
-                        aiPredictionAlert.direction === 'BUY' ? 'bg-[#089981]' : 'bg-[#F23645]'
-                      }`}
-                    >
-                      {aiPredictionAlert.direction} {symbol}
-                    </span>
-                    <span className="text-[#94A3B8] font-mono">
-                      Target 1:{aiPredictionAlert.rrRatio} R:R ({aiPredictionAlert.confidence}% Confluence)
-                    </span>
-                  </div>
-
-                  <div className="font-bold text-white text-xs">{aiPredictionAlert.strategyName}</div>
-
-                  <div className="grid grid-cols-3 gap-1.5 p-2 rounded bg-[#131722] border border-[#2A2E39] font-mono text-[11px]">
-                    <div>
-                      <div className="text-[9px] text-[#787B86]">ENTRY</div>
-                      <div className="font-bold text-[#60A5FA]">{aiPredictionAlert.entryPrice.toFixed(decimals)}</div>
+              <div className="fixed inset-x-0 top-14 z-50 flex justify-center px-3 pointer-events-none">
+                <div className="pointer-events-auto w-[420px] max-w-full max-h-[82vh] bg-[#1E222D]/98 border-2 border-[#00E676] rounded-2xl shadow-2xl backdrop-blur-xl flex flex-col overflow-hidden select-none">
+                  <div className="shrink-0 flex items-center justify-between border-b border-[#2A2E39] px-4 py-3 bg-[#181C27]">
+                    <div className="flex items-center gap-2">
+                      <span className="w-3 h-3 rounded-full bg-[#00E676] animate-ping" />
+                      <span className="font-extrabold text-white text-xs tracking-wider uppercase">
+                        ⚡ AI High-Confluence Prediction
+                      </span>
                     </div>
-                    <div>
-                      <div className="text-[9px] text-[#787B86]">STOP LOSS</div>
-                      <div className="font-bold text-[#F23645]">{aiPredictionAlert.stopLoss.toFixed(decimals)}</div>
-                    </div>
-                    <div>
-                      <div className="text-[9px] text-[#787B86]">TAKE PROFIT</div>
-                      <div className="font-bold text-[#00E676]">{aiPredictionAlert.takeProfit.toFixed(decimals)}</div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-1">
-                    <div className="text-[10px] font-mono text-[#00E676] font-bold">✓ Multi-Factor Institutional Confluence:</div>
-                    {aiPredictionAlert.reasons.map((r, i) => (
-                      <div key={i} className="text-[11px] text-[#D1D4DC] flex items-start gap-1.5">
-                        <Check className="w-3.5 h-3.5 text-[#00E676] shrink-0 mt-0.5" />
-                        <span>{r}</span>
+                    <div className="flex items-center gap-2">
+                      <div className="px-2.5 py-1 rounded bg-[#00E676]/20 text-[#00E676] font-mono font-bold text-xs">
+                        00:{predictionCountdown.toString().padStart(2, '0')}
                       </div>
-                    ))}
+                      <button
+                        type="button"
+                        onClick={() => setAiPredictionAlert(null)}
+                        className="p-1 rounded text-[#94A3B8] hover:text-white hover:bg-slate-800 cursor-pointer"
+                        aria-label="Close prediction alert"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="pt-2 flex items-center gap-2">
+                  <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 space-y-2 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span
+                        className={`px-2 py-0.5 rounded font-mono font-extrabold text-xs text-white ${
+                          aiPredictionAlert.direction === 'BUY' ? 'bg-[#089981]' : 'bg-[#F23645]'
+                        }`}
+                      >
+                        {aiPredictionAlert.direction} {symbol}
+                      </span>
+                      <span className="text-[#94A3B8] font-mono">
+                        Target 1:{aiPredictionAlert.rrRatio} R:R ({aiPredictionAlert.confidence}% Confluence)
+                      </span>
+                    </div>
+
+                    <div className="font-bold text-white text-xs">{aiPredictionAlert.strategyName}</div>
+
+                    <div className="grid grid-cols-3 gap-1.5 p-2 rounded bg-[#131722] border border-[#2A2E39] font-mono text-[11px]">
+                      <div>
+                        <div className="text-[9px] text-[#787B86]">ENTRY</div>
+                        <div className="font-bold text-[#60A5FA]">{aiPredictionAlert.entryPrice.toFixed(decimals)}</div>
+                      </div>
+                      <div>
+                        <div className="text-[9px] text-[#787B86]">STOP LOSS</div>
+                        <div className="font-bold text-[#F23645]">{aiPredictionAlert.stopLoss.toFixed(decimals)}</div>
+                      </div>
+                      <div>
+                        <div className="text-[9px] text-[#787B86]">TAKE PROFIT</div>
+                        <div className="font-bold text-[#00E676]">{aiPredictionAlert.takeProfit.toFixed(decimals)}</div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="text-[10px] font-mono text-[#00E676] font-bold">✓ Multi-Factor Institutional Confluence:</div>
+                      {aiPredictionAlert.reasons.map((r, i) => (
+                        <div key={i} className="text-[11px] text-[#D1D4DC] flex items-start gap-1.5">
+                          <Check className="w-3.5 h-3.5 text-[#00E676] shrink-0 mt-0.5" />
+                          <span>{r}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="shrink-0 px-4 py-3 border-t border-[#2A2E39] bg-[#181C27] flex items-center gap-2">
                     <button
                       type="button"
                       onClick={() => {
@@ -1711,8 +1864,8 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
 
             {/* FLOATING ORDER TICKET FLYOUT */}
             {showOrderTicketFlyout && (
-              <div className="absolute top-14 right-[84px] z-30 w-[290px] rounded-xl bg-[#181C27]/95 backdrop-blur-md border border-[#2A2E39] shadow-2xl p-3 space-y-2.5 text-xs">
-                <div className="flex items-center justify-between border-b border-[#2A2E39] pb-2">
+              <div className="fixed top-14 right-3 sm:right-[84px] z-40 w-[290px] max-w-[calc(100vw-24px)] max-h-[80vh] rounded-xl bg-[#181C27]/95 backdrop-blur-md border border-[#2A2E39] shadow-2xl flex flex-col overflow-hidden text-xs">
+                <div className="shrink-0 flex items-center justify-between border-b border-[#2A2E39] px-3 py-2.5 bg-[#131722]">
                   <span className="font-bold text-white flex items-center gap-1.5">
                     <Zap className="w-3.5 h-3.5 text-[#00E676]" />
                     <span>Exness Order Execution</span>
@@ -1720,73 +1873,76 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
                   <button
                     type="button"
                     onClick={() => setShowOrderTicketFlyout(false)}
-                    className="text-[#787B86] hover:text-white cursor-pointer"
+                    className="p-1 rounded text-[#787B86] hover:text-white hover:bg-slate-800 cursor-pointer"
+                    aria-label="Close order ticket"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
 
-                <div className="grid grid-cols-2 gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => handleStartDraftOrder('SHORT')}
-                    className={`p-2 rounded border text-left cursor-pointer transition-all ${
-                      tradeDirection === 'SHORT'
-                        ? 'bg-[#F23645] border-[#FF5252] text-white'
-                        : 'bg-[#F23645]/15 border-[#F23645]/40 text-[#F23645]'
-                    }`}
-                  >
-                    <div className="text-[10px] font-bold">SELL</div>
-                    <div className="text-sm font-extrabold font-mono text-white">{bidPrice.toFixed(decimals)}</div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleStartDraftOrder('LONG')}
-                    className={`p-2 rounded border text-left cursor-pointer transition-all ${
-                      tradeDirection === 'LONG'
-                        ? 'bg-[#089981] border-[#00E676] text-white'
-                        : 'bg-[#089981]/15 border-[#089981]/40 text-[#00E676]'
-                    }`}
-                  >
-                    <div className="text-[10px] font-bold">BUY</div>
-                    <div className="text-sm font-extrabold font-mono text-white">{askPrice.toFixed(decimals)}</div>
-                  </button>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[11px] text-[#787B86] block">Lot Size</label>
-                  <div className="flex items-center gap-1">
-                    {[0.1, 0.5, 1.0, 2.0].map((l) => (
-                      <button
-                        key={l}
-                        type="button"
-                        onClick={() => setLotSize(l)}
-                        className={`flex-1 py-1 rounded text-xs font-mono font-bold cursor-pointer ${
-                          lotSize === l ? 'bg-[#2962FF] text-white' : 'bg-[#131722] text-[#787B86] hover:text-white'
-                        }`}
-                      >
-                        {l}
-                      </button>
-                    ))}
+                <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3 space-y-2.5">
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleStartDraftOrder('SHORT')}
+                      className={`p-2 rounded border text-left cursor-pointer transition-all ${
+                        tradeDirection === 'SHORT'
+                          ? 'bg-[#F23645] border-[#FF5252] text-white'
+                          : 'bg-[#F23645]/15 border-[#F23645]/40 text-[#F23645]'
+                      }`}
+                    >
+                      <div className="text-[10px] font-bold">SELL</div>
+                      <div className="text-sm font-extrabold font-mono text-white">{bidPrice.toFixed(decimals)}</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleStartDraftOrder('LONG')}
+                      className={`p-2 rounded border text-left cursor-pointer transition-all ${
+                        tradeDirection === 'LONG'
+                          ? 'bg-[#089981] border-[#00E676] text-white'
+                          : 'bg-[#089981]/15 border-[#089981]/40 text-[#00E676]'
+                      }`}
+                    >
+                      <div className="text-[10px] font-bold">BUY</div>
+                      <div className="text-sm font-extrabold font-mono text-white">{askPrice.toFixed(decimals)}</div>
+                    </button>
                   </div>
-                </div>
 
-                <div className="pt-1">
-                  <button
-                    type="button"
-                    onClick={() => handleStartDraftOrder(tradeDirection)}
-                    className="w-full py-2 rounded-lg bg-[#2962FF] hover:bg-[#1E4BD8] text-white font-bold cursor-pointer shadow-lg"
-                  >
-                    Adjust SL / TP on Chart
-                  </button>
+                  <div className="space-y-1">
+                    <label className="text-[11px] text-[#787B86] block">Lot Size</label>
+                    <div className="flex items-center gap-1">
+                      {[0.1, 0.5, 1.0, 2.0].map((l) => (
+                        <button
+                          key={l}
+                          type="button"
+                          onClick={() => setLotSize(l)}
+                          className={`flex-1 py-1 rounded text-xs font-mono font-bold cursor-pointer ${
+                            lotSize === l ? 'bg-[#2962FF] text-white' : 'bg-[#131722] text-[#787B86] hover:text-white'
+                          }`}
+                        >
+                          {l}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="pt-1">
+                    <button
+                      type="button"
+                      onClick={() => handleStartDraftOrder(tradeDirection)}
+                      className="w-full py-2 rounded-lg bg-[#2962FF] hover:bg-[#1E4BD8] text-white font-bold cursor-pointer shadow-lg"
+                    >
+                      Adjust SL / TP on Chart
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
 
             {/* FLOATING AI COACH & DIAGNOSIS CARD */}
             {showAiFloatingCard && (
-              <div className="absolute top-14 left-14 z-30 w-[360px] max-w-[85vw] max-h-[75vh] overflow-y-auto rounded-xl bg-[#181C27]/98 backdrop-blur-md border border-[#2A2E39] shadow-2xl p-3.5 space-y-3 text-xs">
-                <div className="flex items-center justify-between border-b border-[#2A2E39] pb-2">
+              <div className="fixed top-14 left-3 sm:left-14 z-40 w-[360px] max-w-[calc(100vw-24px)] max-h-[80vh] rounded-xl bg-[#181C27]/98 backdrop-blur-md border border-[#2A2E39] shadow-2xl flex flex-col overflow-hidden text-xs">
+                <div className="shrink-0 flex items-center justify-between border-b border-[#2A2E39] px-3.5 py-2.5 bg-[#131722]">
                   <div className="flex items-center gap-2">
                     <Sparkles className="w-4 h-4 text-[#00E676]" />
                     <span className="font-bold text-white text-sm">AI ট্রেডিং মেন্টর</span>
@@ -1797,11 +1953,13 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
                   <button
                     type="button"
                     onClick={() => setShowAiFloatingCard(false)}
-                    className="text-[#787B86] hover:text-white cursor-pointer"
+                    className="p-1 rounded text-[#787B86] hover:text-white hover:bg-slate-800 cursor-pointer"
+                    aria-label="Close AI Coach"
                   >
                     <X className="w-4 h-4" />
                   </button>
                 </div>
+                <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3.5 space-y-3">
 
                 {isAiMarking && (
                   <div className="py-6 text-center font-mono text-[#60A5FA]">
@@ -1915,6 +2073,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
                     </div>
                   </div>
                 )}
+                </div>
               </div>
             )}
 
@@ -2178,8 +2337,12 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
 
         <div className="flex items-center gap-3 text-[#787B86]">
           <span className="flex items-center gap-1 text-[10px]">
-            <Radio className="w-3 h-3 text-[#00E676] animate-pulse" />
-            <span className="text-[#00E676]">Binance Feed Connected</span>
+            <Radio className={`w-3 h-3 ${sessionStatus.isOpen ? 'text-[#00E676] animate-pulse' : 'text-[#F59E0B]'}`} />
+            <span className={sessionStatus.isOpen ? 'text-[#00E676]' : 'text-[#F59E0B]'}>
+              {sessionStatus.isOpen
+                ? `28-Pair Live Oracle (${symbol})`
+                : `${symbol} Market Closed (${sessionStatus.countdownText})`}
+            </span>
           </span>
           <button
             type="button"
@@ -2214,27 +2377,16 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
 
       {/* MOBILE BOTTOM ANALYSIS & ACTION BAR (FOR TOUCH SCREENS & MOBILE DEVICES) */}
       <div className="md:hidden shrink-0 bg-[#181C27] border-t border-[#2A2E39] px-2 py-1.5 flex items-center justify-between gap-1 z-30 select-none shadow-2xl">
-        {/* Quick Pair Toggle */}
-        <div className="flex items-center gap-1 bg-[#131722] p-0.5 rounded border border-[#2A2E39]">
-          <button
-            type="button"
-            onClick={() => handleSelectSymbol('BTC/USD')}
-            className={`px-2 py-1 rounded text-[11px] font-bold font-mono transition-all ${
-              symbol === 'BTC/USD' ? 'bg-[#2962FF] text-white shadow' : 'text-[#94A3B8]'
-            }`}
-          >
-            BTC
-          </button>
-          <button
-            type="button"
-            onClick={() => handleSelectSymbol('XAU/USD')}
-            className={`px-2 py-1 rounded text-[11px] font-bold font-mono transition-all ${
-              symbol === 'XAU/USD' ? 'bg-[#FFB300] text-black shadow' : 'text-[#94A3B8]'
-            }`}
-          >
-            GOLD
-          </button>
-        </div>
+        {/* Mobile Pair Selector Trigger */}
+        <button
+          type="button"
+          onClick={() => setShowPairSelectorModal(true)}
+          className="px-2 py-1 rounded bg-[#2962FF] text-white text-[11px] font-bold font-mono flex items-center gap-1 shrink-0 shadow"
+        >
+          <span className={`w-1.5 h-1.5 rounded-full ${sessionStatus.isOpen ? 'bg-[#00E676]' : 'bg-[#F59E0B]'}`} />
+          <span>{symbolMeta.shortName}</span>
+          <ChevronDown className="w-3 h-3 opacity-80" />
+        </button>
 
         {/* Live Market vs Replay Mode Indicator Button */}
         <button
@@ -2336,21 +2488,21 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
 
       {/* 4. AI STRATEGY & SETUP LAB MODAL */}
       {showAiStrategyLab && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="w-full max-w-4xl max-h-[88vh] rounded-2xl bg-[#1E222D] border border-[#2A2E39] shadow-2xl flex flex-col overflow-hidden">
-            <div className="px-5 py-3.5 border-b border-[#2A2E39] flex items-center justify-between bg-[#181C27]">
-              <div className="flex items-center gap-2.5">
-                <BrainCircuit className="w-5 h-5 text-[#FFB300]" />
-                <div>
-                  <h3 className="font-bold text-white text-sm">
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-4">
+          <div className="w-full max-w-4xl max-h-[90vh] rounded-2xl bg-[#1E222D] border border-[#2A2E39] shadow-2xl flex flex-col overflow-hidden">
+            <div className="shrink-0 px-4 sm:px-5 py-3.5 border-b border-[#2A2E39] flex items-center justify-between gap-2 bg-[#181C27]">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <BrainCircuit className="w-5 h-5 text-[#FFB300] shrink-0" />
+                <div className="min-w-0">
+                  <h3 className="font-bold text-white text-sm truncate">
                     AI Strategy & Setup Lab — Proven High-Probability Methods
                   </h3>
-                  <p className="text-[11px] text-[#94A3B8]">
+                  <p className="text-[11px] text-[#94A3B8] truncate">
                     AI স্বয়ংক্রিয়ভাবে গত ৩ মাসের {symbol} চার্ট স্ক্যান করে হাই-উইনরেট স্ট্র্যাটেজি ও ক্যান্ডেলসহ বের করেছে
                   </p>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 shrink-0">
                 <button
                   type="button"
                   onClick={handleScanNewLiveMethods}
@@ -2358,12 +2510,13 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
                   className="px-3 py-1.5 rounded-lg bg-[#2962FF]/20 hover:bg-[#2962FF] text-[#60A5FA] hover:text-white border border-[#2962FF]/40 text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isScanningNewMethods ? 'animate-spin' : ''}`} />
-                  <span>{isScanningNewMethods ? 'স্ক্যানিং...' : '🔄 Scan Live for New Methods'}</span>
+                  <span className="hidden sm:inline">{isScanningNewMethods ? 'স্ক্যানিং...' : '🔄 Scan Live'}</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => setShowAiStrategyLab(false)}
-                  className="text-[#787B86] hover:text-white p-1 rounded cursor-pointer"
+                  className="text-[#94A3B8] hover:text-white p-1.5 rounded-lg hover:bg-slate-800 cursor-pointer"
+                  aria-label="Close Strategy Lab"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -2371,13 +2524,13 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
             </div>
 
             {/* Filter Tabs */}
-            <div className="px-5 py-2 border-b border-[#2A2E39] flex items-center gap-2 bg-[#131722] overflow-x-auto text-xs">
+            <div className="shrink-0 px-5 py-2 border-b border-[#2A2E39] flex items-center gap-2 bg-[#131722] overflow-x-auto text-xs">
               {['ALL', 'ICT / SMC', 'FIBONACCI', 'LIQUIDITY', 'WYCKOFF'].map((cat) => (
                 <button
                   key={cat}
                   type="button"
                   onClick={() => setStrategyLabCategory(cat)}
-                  className={`px-3 py-1 rounded-lg font-bold transition-colors cursor-pointer ${
+                  className={`px-3 py-1 rounded-lg font-bold shrink-0 transition-colors cursor-pointer ${
                     strategyLabCategory === cat
                       ? 'bg-[#2962FF] text-white shadow'
                       : 'bg-[#1E222D] text-[#94A3B8] hover:text-white'
@@ -2389,7 +2542,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
             </div>
 
             {/* Setups Cards with Visual Candle Snapshots */}
-            <div className="flex-1 overflow-y-auto p-5 space-y-4">
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-5 space-y-4">
               {filteredSetups.map((setup) => {
                 const title = aiLanguage === 'en' ? setup.titleEn : setup.titleBn;
                 const desc = aiLanguage === 'en' ? setup.descriptionEn : setup.descriptionBn;
@@ -2560,20 +2713,21 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
 
       {/* 5. INDICATORS MODAL */}
       {showIndicatorModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-lg rounded-xl bg-[#1E222D] border border-[#2A2E39] shadow-2xl overflow-hidden">
-            <div className="px-4 py-3 border-b border-[#2A2E39] flex items-center justify-between">
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+          <div className="w-full max-w-lg max-h-[85vh] rounded-xl bg-[#1E222D] border border-[#2A2E39] shadow-2xl flex flex-col overflow-hidden">
+            <div className="shrink-0 px-4 py-3 border-b border-[#2A2E39] flex items-center justify-between bg-[#181C27]">
               <span className="font-bold text-white text-sm">Indicators, SMC & Strategies</span>
               <button
                 type="button"
                 onClick={() => setShowIndicatorModal(false)}
-                className="text-[#787B86] hover:text-white cursor-pointer"
+                className="p-1 rounded text-[#94A3B8] hover:text-white hover:bg-slate-800 cursor-pointer"
+                aria-label="Close Indicators"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="p-3 border-b border-[#2A2E39] flex items-center gap-2 bg-[#131722]">
+            <div className="shrink-0 p-3 border-b border-[#2A2E39] flex items-center gap-2 bg-[#131722]">
               <Search className="w-4 h-4 text-[#787B86]" />
               <input
                 type="text"
@@ -2584,7 +2738,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
               />
             </div>
 
-            <div className="max-h-[55vh] overflow-y-auto divide-y divide-[#2A2E39]">
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain divide-y divide-[#2A2E39]">
               {indicators
                 .filter((i) => i.name.toLowerCase().includes(indicatorSearch.toLowerCase()))
                 .map((ind) => (
@@ -2609,6 +2763,118 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
                     </span>
                   </div>
                 ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 6. ALL 28 LIVE MARKETS SELECTOR MODAL */}
+      {showPairSelectorModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4"
+          onClick={() => setShowPairSelectorModal(false)}
+        >
+          <div
+            className="w-full max-w-2xl max-h-[86vh] rounded-2xl bg-[#1E222D] border border-[#2A2E39] shadow-2xl flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="shrink-0 px-4 sm:px-5 py-3.5 border-b border-[#2A2E39] flex items-center justify-between bg-[#181C27]">
+              <div>
+                <h3 className="font-bold text-white text-sm">All 28 Live Market Pairs & History</h3>
+                <p className="text-[11px] text-[#94A3B8]">
+                  25 Forex Majors & Crosses · Metals (Gold, Silver) · Crypto (BTC/USD)
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowPairSelectorModal(false)}
+                className="p-1.5 rounded-lg text-[#94A3B8] hover:text-white hover:bg-slate-800 cursor-pointer"
+                aria-label="Close Market Selector"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="shrink-0 p-3 border-b border-[#2A2E39] flex items-center gap-2 bg-[#131722]">
+              <Search className="w-4 h-4 text-[#787B86]" />
+              <input
+                type="text"
+                value={pairSearchQuery}
+                onChange={(e) => setPairSearchQuery(e.target.value)}
+                placeholder="Search any pair (e.g. EUR/USD, GBP/JPY, Gold, Silver, BTC)..."
+                className="w-full bg-transparent text-xs text-white focus:outline-none"
+                autoFocus
+              />
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3 sm:p-4 space-y-4">
+              {MARKET_CATEGORIES.map((category) => {
+                const q = pairSearchQuery.trim().toLowerCase();
+                const items = ALL_SUPPORTED_SYMBOLS.filter((sym) => {
+                  const meta = BRAND_CONFIG.markets[sym];
+                  if (meta.category !== category) return false;
+                  if (!q) return true;
+                  return (
+                    sym.toLowerCase().includes(q) ||
+                    meta.name.toLowerCase().includes(q) ||
+                    meta.shortName.toLowerCase().includes(q)
+                  );
+                });
+                if (items.length === 0) return null;
+
+                return (
+                  <div key={category} className="space-y-2">
+                    <div className="text-[11px] font-mono font-bold uppercase tracking-wider text-[#94A3B8] px-1">
+                      {category} ({items.length})
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {items.map((sym) => {
+                        const meta = BRAND_CONFIG.markets[sym];
+                        const symSession = getMarketSessionStatus(sym, termCurrentTime);
+                        const tick = liveMarketStreamer.getLatestTick(sym);
+                        const active = sym === symbol;
+                        return (
+                          <button
+                            key={sym}
+                            type="button"
+                            onClick={() => handleSelectSymbol(sym)}
+                            className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between gap-2 ${
+                              active
+                                ? 'bg-[#2962FF]/20 border-[#2962FF] shadow-md'
+                                : 'bg-[#131722] border-[#2A2E39] hover:border-slate-500'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5">
+                                <span
+                                  className={`w-2 h-2 rounded-full ${
+                                    symSession.isOpen ? 'bg-[#00E676]' : 'bg-[#F59E0B]'
+                                  }`}
+                                />
+                                <span className="font-mono font-bold text-xs text-white">{sym}</span>
+                                {!symSession.isOpen && (
+                                  <span className="px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-mono text-[9px] font-bold">
+                                    CLOSED
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[10px] text-[#94A3B8] truncate mt-0.5">{meta.name}</div>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <div className="font-mono font-bold text-xs text-white tabular-nums">
+                                {(tick?.price || meta.defaultPrice).toFixed(meta.decimals)}
+                              </div>
+                              <div className="text-[9px] font-mono text-[#787B86]">
+                                {symSession.isOpen ? 'LIVE FEED' : symSession.countdownText}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>

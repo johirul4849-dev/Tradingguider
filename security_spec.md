@@ -20,3 +20,5 @@
 10. **Immortal Field Mutation**: Modifying `createdAt` or `entryPrice` on an existing trade update -> Rejected by `incoming().createdAt == existing().createdAt` and `affectedKeys().hasOnly(...)`.
 11. **Terminal State Bypass**: Updating an already closed trade (`status != 'OPEN'`) -> Rejected by terminal state lock `existing().status == 'OPEN'` (except AI review summary attachment).
 12. **Unfiltered Collection List Scraping**: Listing trades without `where('userId', '==', uid)` -> Rejected by `resource.data.userId == request.auth.uid`.
+13. **Self-Approved Subscription Escalation (`/subscriptions/{userId}`)**: A user updating their own subscription to `ACTIVE_SUBSCRIBED` or extending `freeTrialExpiresAt` / `subscriptionExpiresAt` -> Rejected because owner updates only permit `PENDING_APPROVAL` (with `lastPaymentSubmission.status == 'PENDING'`), `TRIAL_EXPIRED`, or profile display sync; only `isAdmin()` can grant `ACTIVE_SUBSCRIBED` or extend expiry timestamps.
+

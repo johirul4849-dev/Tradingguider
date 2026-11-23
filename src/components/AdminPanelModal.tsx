@@ -29,6 +29,7 @@ import {
   SUBSCRIPTION_PACKAGES,
   calculateRemainingCountdown,
 } from '../services/subscriptionService';
+import { auth, subscribeToAllSubscriptionsAsAdminInDb } from '../lib/firebase';
 
 interface AdminPanelModalProps {
   isOpen: boolean;
@@ -81,8 +82,19 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({ isOpen, onClos
   useEffect(() => {
     if (isOpen && isAuthenticated) {
       refreshData();
-      const unsub = subscriptionService.subscribe(refreshData);
-      return unsub;
+      const unsubLocal = subscriptionService.subscribe(refreshData);
+      let unsubRemote: (() => void) | undefined;
+
+      if (auth.currentUser?.email === 'johirul4891@gmail.com' && auth.currentUser?.emailVerified) {
+        unsubRemote = subscribeToAllSubscriptionsAsAdminInDb((remotes) => {
+          subscriptionService.mergeRemoteSubscriptions(remotes);
+        });
+      }
+
+      return () => {
+        unsubLocal();
+        if (unsubRemote) unsubRemote();
+      };
     }
   }, [isOpen, isAuthenticated]);
 
@@ -194,71 +206,82 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({ isOpen, onClos
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md p-4 overflow-y-auto">
-      <div className="relative w-full max-w-4xl bg-[#131722] border border-[#2A2E39] rounded-2xl shadow-2xl p-6 sm:p-8 text-[#D1D4DC]">
-        <button
-          onClick={onClose}
-          className="absolute top-5 right-5 text-[#94A3B8] hover:text-white transition-colors"
-        >
-          <X className="w-5 h-5" />
-        </button>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md p-3 sm:p-5">
+      <div className="w-full max-w-4xl max-h-[90vh] sm:max-h-[92vh] bg-[#131722] border border-[#2A2E39] rounded-2xl shadow-2xl text-[#D1D4DC] flex flex-col overflow-hidden">
+        {/* Pinned Header Bar (X is always reachable without zooming out) */}
+        <div className="shrink-0 px-5 py-3.5 border-b border-[#2A2E39] bg-[#181C27] flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-8 h-8 rounded-lg bg-[#F0B90B] text-black font-black flex items-center justify-center shadow-md shrink-0">
+              TP
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-2 truncate">
+                <span>Smart Admin Console</span>
+                {isAuthenticated && (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#00E676]/20 text-[#00E676] border border-[#00E676]/40">
+                    LIVE
+                  </span>
+                )}
+              </h3>
+              {isAuthenticated && (
+                <p className="text-[11px] text-[#94A3B8] truncate">
+                  Official Binance Pay ID: <strong className="text-white font-mono">{BINANCE_PAYMENT_CONFIG.payId}</strong>
+                </p>
+              )}
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close admin panel"
+            className="w-8 h-8 rounded-lg bg-[#2A2E39]/70 hover:bg-[#363A45] text-[#94A3B8] hover:text-white flex items-center justify-center transition-colors shrink-0 cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
 
         {/* PASSCODE MODAL GATE */}
         {!isAuthenticated ? (
-          <div className="max-w-md mx-auto py-8 text-center">
-            <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-[#F0B90B]/10 border border-[#F0B90B]/40 flex items-center justify-center text-[#F0B90B] shadow-lg">
-              <Shield className="w-7 h-7" />
+          <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-6 sm:p-8">
+            <div className="max-w-md mx-auto py-4 text-center">
+              <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-[#F0B90B]/10 border border-[#F0B90B]/40 flex items-center justify-center text-[#F0B90B] shadow-lg">
+                <Shield className="w-7 h-7" />
+              </div>
+              <h3 className="text-xl font-bold text-white mb-2">Tradingguider Smart Admin Console</h3>
+              <p className="text-xs text-[#94A3B8] mb-6">
+                Enter the authorized access code to manage subscriptions, Binance finance, and influencer
+                payouts.
+              </p>
+
+              <form onSubmit={handleVerifyPasscode} className="space-y-4">
+                <input
+                  type="password"
+                  autoFocus
+                  placeholder="Enter Admin Access Code"
+                  value={passcodeInput}
+                  onChange={(e) => setPasscodeInput(e.target.value)}
+                  className="w-full bg-[#0B0E14] border border-[#2A2E39] rounded-xl px-4 py-3 text-center text-sm font-mono text-white tracking-widest placeholder-[#64748B] focus:outline-none focus:border-[#F0B90B]"
+                />
+
+                {passcodeError && (
+                  <p className="text-xs text-[#F23645] font-semibold">{passcodeError}</p>
+                )}
+
+                <button
+                  type="submit"
+                  className="w-full py-3 rounded-xl bg-gradient-to-r from-[#F0B90B] to-[#FF9100] text-black font-extrabold text-xs uppercase tracking-wider shadow-lg shadow-[#F0B90B]/20 transition-all cursor-pointer"
+                >
+                  Verify & Unlock Dashboard
+                </button>
+              </form>
             </div>
-            <h3 className="text-xl font-bold text-white mb-2">Tradingguider Smart Admin Console</h3>
-            <p className="text-xs text-[#94A3B8] mb-6">
-              Enter the authorized access code to manage subscriptions, Binance finance, and influencer
-              payouts.
-            </p>
-
-            <form onSubmit={handleVerifyPasscode} className="space-y-4">
-              <input
-                type="password"
-                autoFocus
-                placeholder="Enter Admin Access Code"
-                value={passcodeInput}
-                onChange={(e) => setPasscodeInput(e.target.value)}
-                className="w-full bg-[#0B0E14] border border-[#2A2E39] rounded-xl px-4 py-3 text-center text-sm font-mono text-white tracking-widest placeholder-[#64748B] focus:outline-none focus:border-[#F0B90B]"
-              />
-
-              {passcodeError && (
-                <p className="text-xs text-[#F23645] font-semibold">{passcodeError}</p>
-              )}
-
-              <button
-                type="submit"
-                className="w-full py-3 rounded-xl bg-gradient-to-r from-[#F0B90B] to-[#FF9100] text-black font-extrabold text-xs uppercase tracking-wider shadow-lg shadow-[#F0B90B]/20 transition-all cursor-pointer"
-              >
-                Verify & Unlock Dashboard
-              </button>
-            </form>
           </div>
         ) : (
           /* AUTHENTICATED ADMIN DASHBOARD */
-          <div>
-            {/* Top Admin Header */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#2A2E39] pb-4 mb-5">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-lg bg-[#F0B90B] text-black font-black flex items-center justify-center shadow-md">
-                  TP
-                </div>
-                <div>
-                  <h3 className="text-lg font-bold text-white flex items-center gap-2">
-                    <span>Smart Admin Panel</span>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#00E676]/20 text-[#00E676] border border-[#00E676]/40">
-                      LIVE
-                    </span>
-                  </h3>
-                  <p className="text-xs text-[#94A3B8]">
-                    Official Binance Pay ID: <strong className="text-white font-mono">{BINANCE_PAYMENT_CONFIG.payId}</strong>
-                  </p>
-                </div>
-              </div>
-
+          <div className="flex-1 min-h-0 flex flex-col">
+            {/* Pinned Navigation Tabs */}
+            <div className="shrink-0 px-5 py-3 border-b border-[#2A2E39] bg-[#131722] flex items-center justify-between gap-3 flex-wrap">
               {/* Navigation Tabs */}
               <div className="flex items-center gap-1.5 flex-wrap">
                 <button
@@ -340,13 +363,15 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({ isOpen, onClos
               </div>
             </div>
 
-            {/* Notification Banner */}
-            {actionNotice && (
-              <div className="mb-4 p-3 rounded-lg bg-[#00E676]/15 border border-[#00E676]/40 text-xs font-semibold text-[#00E676] flex items-center gap-2">
-                <Check className="w-4 h-4" />
-                {actionNotice}
-              </div>
-            )}
+            {/* Scrollable Tab Content Area */}
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-5 sm:p-6">
+              {/* Notification Banner */}
+              {actionNotice && (
+                <div className="mb-4 p-3 rounded-lg bg-[#00E676]/15 border border-[#00E676]/40 text-xs font-semibold text-[#00E676] flex items-center gap-2">
+                  <Check className="w-4 h-4" />
+                  {actionNotice}
+                </div>
+              )}
 
             {/* TAB 0: LIVE USER COUNTDOWNS & SUBSCRIPTION MANAGEMENT */}
             {activeTab === 'USER_COUNTDOWNS' && (
@@ -968,6 +993,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({ isOpen, onClos
                 </form>
               </div>
             )}
+            </div>
           </div>
         )}
       </div>

@@ -67,7 +67,12 @@ import {
   getHistoricalTradeLessons,
 } from '../services/marketEngine';
 import { ConfirmationCircle, AiBacktestTeacherEngine } from '../services/aiBacktestTeacherEngine';
-import { SupportedTimeframe, SupportedSymbol } from '../config/brand';
+import {
+  BRAND_CONFIG,
+  SupportedTimeframe,
+  SupportedSymbol,
+  getMarketSessionStatus,
+} from '../config/brand';
 
 export type ChartVisualType = 'candlestick' | 'hollow' | 'heikin' | 'line' | 'area' | 'baseline';
 
@@ -138,8 +143,8 @@ export interface DraftOrderBracket {
 }
 
 interface TradingChartProps {
-  symbol: 'BTC/USD' | 'XAU/USD';
-  onSelectSymbol?: (sym: 'BTC/USD' | 'XAU/USD') => void;
+  symbol: SupportedSymbol;
+  onSelectSymbol?: (sym: SupportedSymbol) => void;
   timeframe: SupportedTimeframe;
   candles: CandleData[];
   totalAvailableCandles: number;
@@ -306,6 +311,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   onOpenAutoBacktestReport,
   onOpenPairPlaybook,
   onInspectCandle,
+  onCandleTimerElapsed,
 }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -410,26 +416,53 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     time: number | null;
   } | null>(null);
 
-  // Live Candle Countdown Timer
+  // Live Candle Countdown Timer & Session Open/Closed State
   const [candleCountdown, setCandleCountdown] = useState<string>('00:00');
+  const [isMarketClosed, setIsMarketClosed] = useState<boolean>(false);
+  const [sessionReopenText, setSessionReopenText] = useState<string>('');
+  const lastPeriodStartRef = useRef<number | null>(null);
+  const onCandleTimerElapsedRef = useRef(onCandleTimerElapsed);
+  useEffect(() => {
+    onCandleTimerElapsedRef.current = onCandleTimerElapsed;
+  }, [onCandleTimerElapsed]);
 
   // Selected Signal Modal state
   const [inspectedSignal, setInspectedSignal] = useState<AiChartSignal | null>(null);
 
-  const decimals = symbol === 'BTC/USD' ? 2 : 2;
+  const symbolMeta = BRAND_CONFIG.markets[symbol] || BRAND_CONFIG.markets['EUR/USD'];
+  const decimals = symbolMeta.decimals;
   const currentCandle = candles[candles.length - 1];
   const currentClose = currentCandle ? currentCandle.close : 0;
-  const spread = symbol === 'BTC/USD' ? 2.5 : 0.25;
+  const spread = symbolMeta.typicalSpread / 2;
   const askPrice = currentClose ? currentClose + spread : 0;
   const bidPrice = currentClose ? currentClose - spread : 0;
 
-  // Real-time calculation of candle close countdown
-  // Auto-calculates based on current clock period and automatically resets to full duration when period completes
+  // Real-time calculation of candle close countdown & automatic period rollover callback
   useEffect(() => {
+    lastPeriodStartRef.current = null;
+
     const updateCountdown = () => {
+      const nowMs = Date.now();
+      const session = getMarketSessionStatus(symbol, nowMs);
+      if (!session.isOpen) {
+        setIsMarketClosed(true);
+        setSessionReopenText(session.countdownText);
+        setCandleCountdown('CLOSED');
+        return;
+      }
+
+      setIsMarketClosed(false);
+      setSessionReopenText('');
+
       const stepSec = TIMEFRAME_SECONDS[timeframe] || 900;
-      const nowSec = Math.floor(Date.now() / 1000);
+      const nowSec = Math.floor(nowMs / 1000);
       const currentPeriodStart = Math.floor(nowSec / stepSec) * stepSec;
+
+      if (lastPeriodStartRef.current !== null && currentPeriodStart > lastPeriodStartRef.current) {
+        onCandleTimerElapsedRef.current?.();
+      }
+      lastPeriodStartRef.current = currentPeriodStart;
+
       const nextPeriodStart = currentPeriodStart + stepSec;
       const remainingSec = Math.max(0, nextPeriodStart - nowSec);
 
@@ -449,9 +482,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     };
 
     updateCountdown();
-    const interval = setInterval(updateCountdown, 1000);
+    const interval = setInterval(updateCountdown, 500);
     return () => clearInterval(interval);
-  }, [timeframe]);
+  }, [timeframe, symbol]);
 
   // Determine current active/draft SL, TP, Entry
   const isDraftMode = draftOrder !== null && draftOrder.active;
@@ -684,6 +717,11 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       }
 
       let series: ISeriesApi<any>;
+      const priceFormat = {
+        type: 'price' as const,
+        precision: decimals,
+        minMove: symbolMeta.tickSize,
+      };
 
       if (chartType === 'candlestick' || chartType === 'heikin') {
         series = chart.addSeries(CandlestickSeries, {
@@ -693,6 +731,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           borderDownColor: '#F23645',
           wickUpColor: '#089981',
           wickDownColor: '#F23645',
+          priceFormat,
         });
       } else if (chartType === 'hollow') {
         series = chart.addSeries(CandlestickSeries, {
@@ -702,11 +741,13 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           borderDownColor: '#F23645',
           wickUpColor: '#089981',
           wickDownColor: '#F23645',
+          priceFormat,
         });
       } else if (chartType === 'line') {
         series = chart.addSeries(LineSeries, {
           color: '#2962FF',
           lineWidth: 2,
+          priceFormat,
         });
       } else if (chartType === 'area') {
         series = chart.addSeries(AreaSeries, {
@@ -714,6 +755,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           bottomColor: 'rgba(41, 98, 255, 0.02)',
           lineColor: '#2962FF',
           lineWidth: 2,
+          priceFormat,
         });
       } else {
         series = chart.addSeries(BaselineSeries, {
@@ -725,6 +767,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           bottomFillColor2: 'rgba(242, 54, 69, 0.35)',
           bottomLineColor: '#F23645',
           lineWidth: 2,
+          priceFormat,
         });
       }
 
@@ -1042,7 +1085,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       return;
     }
 
-    const defaultOffset = symbol === 'BTC/USD' ? 420 : 6.5;
+    const defaultOffset = symbolMeta.defaultBracketDistance;
     const stepSec = TIMEFRAME_SECONDS[timeframe] || 900;
     const t2 = t + stepSec * (activeTool === 'longpos' || activeTool === 'shortpos' ? 24 : 14);
 
@@ -1242,8 +1285,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       ? Number((Math.abs(orderRefPrice - effectiveSl) * contractUnits).toFixed(2))
       : 0;
   const liveRrVal = slDollar > 0 && tpDollar > 0 ? Number((tpDollar / slDollar).toFixed(2)) : 0;
-  const tpPips = effectiveTp && orderRefPrice ? Math.abs(effectiveTp - orderRefPrice) : 0;
-  const slPips = effectiveSl && orderRefPrice ? Math.abs(orderRefPrice - effectiveSl) : 0;
+  const tpPips = effectiveTp && orderRefPrice ? Math.abs(effectiveTp - orderRefPrice) / symbolMeta.pipSize : 0;
+  const slPips = effectiveSl && orderRefPrice ? Math.abs(orderRefPrice - effectiveSl) / symbolMeta.pipSize : 0;
 
   const leftTools: Array<{ id: DrawingToolType; label: string; icon: React.ReactNode }> = [
     { id: 'cursor', label: 'Crosshair', icon: <Crosshair className="w-4 h-4" /> },
@@ -1439,12 +1482,22 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           <div className="absolute top-2.5 right-2 left-2 sm:left-auto sm:right-3 z-30 flex items-center justify-start sm:justify-end gap-1.5 pointer-events-none max-w-full overflow-x-auto no-scrollbar py-0.5 whitespace-nowrap">
             {/* Live Candle Countdown Timer */}
             <div
-              title="Time remaining until current timeframe candle closes"
-              className="pointer-events-auto px-2 py-1 rounded-md bg-[#1E222D]/95 border border-[#2A2E39] text-xs font-mono flex items-center gap-1.5 shadow-lg shrink-0"
+              title={
+                isMarketClosed
+                  ? `Market Closed (${sessionReopenText}) — Frozen at Friday close`
+                  : 'Time remaining until current timeframe candle closes'
+              }
+              className={`pointer-events-auto px-2 py-1 rounded-md border text-xs font-mono flex items-center gap-1.5 shadow-lg shrink-0 ${
+                isMarketClosed
+                  ? 'bg-amber-950/90 border-amber-500/50 text-amber-300'
+                  : 'bg-[#1E222D]/95 border-[#2A2E39] text-white'
+              }`}
             >
-              <Clock className="w-3.5 h-3.5 text-[#00E676]" />
+              <Clock className={`w-3.5 h-3.5 ${isMarketClosed ? 'text-amber-400' : 'text-[#00E676]'}`} />
               <span className="text-[#94A3B8] text-[11px]">{timeframe}:</span>
-              <span className="font-bold text-white text-[11px]">{candleCountdown}</span>
+              <span className={`font-bold text-[11px] ${isMarketClosed ? 'text-amber-300' : 'text-white'}`}>
+                {isMarketClosed && sessionReopenText ? `CLOSED (${sessionReopenText})` : candleCountdown}
+              </span>
             </div>
 
             {/* Pair Mastery Playbook Trigger */}
@@ -1456,7 +1509,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 title={`Open institutional trading playbook for ${symbol}`}
               >
                 <BookOpen className="w-3.5 h-3.5" />
-                <span>📘 {symbol === 'XAU/USD' ? 'Gold Playbook' : 'BTC Playbook'}</span>
+                <span>📘 {symbolMeta.shortName} Playbook</span>
               </button>
             )}
 
@@ -2373,16 +2426,16 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                         );
                       })}
 
-                    {/* DEDICATED 🎯 PERFECT ENTRY PLACE SYMBOL & HORIZONTAL TRIGGER LEVEL (সঠিক এন্ট্রি নেওয়ার নির্দিষ্ট স্থান ও সিম্বল) */}
+                    {/* DEDICATED 🎯 PERFECT ENTRY PLACE SYMBOL & HORIZONTAL TRIGGER LEVEL */}
                     {showPerfectEntrySymbols && (() => {
                       const entryPrice = circle.prediction?.entryPrice || circle.price;
                       const entryY = getYFromPrice(entryPrice, y);
                       const slY = getYFromPrice(
-                        circle.prediction?.stopLoss || circle.stopLossBox?.invalidationPrice || (isBull ? entryPrice - 50 : entryPrice + 50),
+                        circle.prediction?.stopLoss || circle.stopLossBox?.invalidationPrice || (isBull ? entryPrice - symbolMeta.defaultBracketDistance : entryPrice + symbolMeta.defaultBracketDistance),
                         isBull ? y + 45 : y - 45
                       );
                       const tpY = getYFromPrice(
-                        circle.prediction?.takeProfit1 || (circle.targetBoxes?.[0]?.price || (isBull ? entryPrice + 100 : entryPrice - 100)),
+                        circle.prediction?.takeProfit1 || (circle.targetBoxes?.[0]?.price || (isBull ? entryPrice + symbolMeta.defaultBracketDistance * 2 : entryPrice - symbolMeta.defaultBracketDistance * 2)),
                         isBull ? y - 60 : y + 60
                       );
                       const entryColor = isBull ? '#00E676' : '#FF1744';
@@ -2871,7 +2924,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 if (d.type === 'longpos' || d.type === 'shortpos') {
                   const isLong = d.type === 'longpos';
                   const entryY = y1;
-                  const defaultDist = symbol === 'BTC/USD' ? 400 : 6.0;
+                  const defaultDist = symbolMeta.defaultBracketDistance;
                   const tpPrice = d.targetPrice ?? (isLong ? d.price1 + defaultDist * 3.0 : d.price1 - defaultDist * 3.0);
                   const slPrice = d.stopPrice ?? (isLong ? d.price1 - defaultDist : d.price1 + defaultDist);
                   const tpY = getYFromPrice(tpPrice, entryY - 70);
@@ -3075,55 +3128,58 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
           {/* AI SIGNAL INSPECTOR MODAL */}
           {inspectedSignal && (
-            <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 w-[420px] max-w-[94vw] rounded-2xl bg-[#1E222D]/98 border-2 border-[#00E676] shadow-2xl p-4 backdrop-blur-xl">
-              <div className="flex items-center justify-between border-b border-[#2A2E39] pb-2 mb-2.5">
-                <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded-full bg-[#00E676] animate-ping" />
-                  <span className="font-extrabold text-white text-xs uppercase">AI {inspectedSignal.title} SIGNAL</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setInspectedSignal(null)}
-                  className="text-[#787B86] hover:text-white cursor-pointer"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-
-              <div className="space-y-2 text-xs">
-                <div className="font-bold text-white">{inspectedSignal.subTitle}</div>
-                <div className="grid grid-cols-3 gap-1.5 p-2 rounded bg-[#131722] border border-[#2A2E39] font-mono text-[11px]">
-                  <div>
-                    <div className="text-[9px] text-[#787B86]">ENTRY</div>
-                    <div className="font-bold text-[#60A5FA]">{inspectedSignal.entryPrice.toFixed(decimals)}</div>
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/70 backdrop-blur-sm">
+              <div className="w-[420px] max-w-full max-h-[88vh] rounded-2xl bg-[#1E222D] border-2 border-[#00E676] shadow-2xl flex flex-col overflow-hidden">
+                <div className="shrink-0 px-4 py-3 border-b border-[#2A2E39] bg-[#181C27] flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="w-2.5 h-2.5 rounded-full bg-[#00E676] animate-ping shrink-0" />
+                    <span className="font-extrabold text-white text-xs uppercase truncate">AI {inspectedSignal.title} SIGNAL</span>
                   </div>
-                  <div>
-                    <div className="text-[9px] text-[#787B86]">STOP LOSS</div>
-                    <div className="font-bold text-[#F23645]">{inspectedSignal.stopLoss.toFixed(decimals)}</div>
-                  </div>
-                  <div>
-                    <div className="text-[9px] text-[#787B86]">TARGET TP</div>
-                    <div className="font-bold text-[#00E676]">{inspectedSignal.takeProfit.toFixed(decimals)}</div>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setInspectedSignal(null)}
+                    aria-label="Close AI signal"
+                    className="w-7 h-7 rounded-lg bg-[#2A2E39] hover:bg-[#363A45] text-[#94A3B8] hover:text-white flex items-center justify-center shrink-0 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
                 </div>
 
-                <div className="space-y-1">
-                  <div className="text-[10px] font-mono text-[#00E676] font-bold">✓ Confirmation Factors on this Candle:</div>
-                  {inspectedSignal.checklist.map((c, i) => (
-                    <div key={i} className="text-[11px] text-[#D1D4DC] flex items-start gap-1.5">
-                      <Check className="w-3.5 h-3.5 text-[#00E676] shrink-0 mt-0.5" />
-                      <span>{c}</span>
+                <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 space-y-2.5 text-xs">
+                  <div className="font-bold text-white">{inspectedSignal.subTitle}</div>
+                  <div className="grid grid-cols-3 gap-1.5 p-2 rounded bg-[#131722] border border-[#2A2E39] font-mono text-[11px]">
+                    <div>
+                      <div className="text-[9px] text-[#787B86]">ENTRY</div>
+                      <div className="font-bold text-[#60A5FA]">{inspectedSignal.entryPrice.toFixed(decimals)}</div>
                     </div>
-                  ))}
+                    <div>
+                      <div className="text-[9px] text-[#787B86]">STOP LOSS</div>
+                      <div className="font-bold text-[#F23645]">{inspectedSignal.stopLoss.toFixed(decimals)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[9px] text-[#787B86]">TARGET TP</div>
+                      <div className="font-bold text-[#00E676]">{inspectedSignal.takeProfit.toFixed(decimals)}</div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <div className="text-[10px] font-mono text-[#00E676] font-bold">✓ Confirmation Factors on this Candle:</div>
+                    {inspectedSignal.checklist.map((c, i) => (
+                      <div key={i} className="text-[11px] text-[#D1D4DC] flex items-start gap-1.5">
+                        <Check className="w-3.5 h-3.5 text-[#00E676] shrink-0 mt-0.5" />
+                        <span>{c}</span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {inspectedSignal.avoidZoneNote && (
+                    <div className="p-2 rounded bg-[#F23645]/15 border border-[#F23645]/30 text-[11px] text-[#FF8A80]">
+                      <strong>⛔ Avoid Trap Note:</strong> {inspectedSignal.avoidZoneNote}
+                    </div>
+                  )}
                 </div>
 
-                {inspectedSignal.avoidZoneNote && (
-                  <div className="p-2 rounded bg-[#F23645]/15 border border-[#F23645]/30 text-[11px] text-[#FF8A80]">
-                    <strong>⛔ Avoid Trap Note:</strong> {inspectedSignal.avoidZoneNote}
-                  </div>
-                )}
-
-                <div className="pt-2 flex items-center gap-2">
+                <div className="shrink-0 px-4 py-3 border-t border-[#2A2E39] bg-[#181C27] flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => {
@@ -3140,7 +3196,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                   <button
                     type="button"
                     onClick={() => setInspectedSignal(null)}
-                    className="px-3 py-2 rounded-xl bg-[#2A2E39] text-[#94A3B8] hover:text-white cursor-pointer"
+                    className="px-3 py-2 rounded-xl bg-[#2A2E39] text-[#94A3B8] hover:text-white text-xs cursor-pointer"
                   >
                     Close
                   </button>
@@ -3156,132 +3212,137 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             const pred = inspectedEntryCircle.prediction;
 
             return (
-              <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 w-[460px] max-w-[94vw] max-h-[82vh] overflow-y-auto rounded-2xl bg-[#141722]/98 border-2 border-sky-400 shadow-2xl p-4 space-y-3 backdrop-blur-xl select-none animate-fadeIn">
-                <div className="flex items-center justify-between border-b border-[#2A2E39] pb-2.5">
-                  <div className="flex items-center gap-2">
-                    <span className="p-1.5 rounded-lg bg-sky-500/20 text-sky-400">
-                      <Crosshair className="w-4 h-4" />
-                    </span>
-                    <div>
-                      <span className="font-extrabold text-white text-xs block">
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/70 backdrop-blur-sm">
+                <div className="w-[460px] max-w-full max-h-[88vh] rounded-2xl bg-[#141722] border-2 border-sky-400 shadow-2xl flex flex-col overflow-hidden select-none animate-fadeIn">
+                  <div className="shrink-0 px-4 py-3 border-b border-[#2A2E39] bg-[#181C27] flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="p-1.5 rounded-lg bg-sky-500/20 text-sky-400 shrink-0">
+                        <Crosshair className="w-4 h-4" />
+                      </span>
+                      <div className="min-w-0">
+                        <span className="font-extrabold text-white text-xs block truncate">
+                          {aiLanguage === 'en'
+                            ? '🎯 Perfect Entry Place & Execution Blueprint'
+                            : '🎯 সঠিক এন্ট্রি নেওয়ার নির্দিষ্ট স্থান ও ট্রেড রুলস'}
+                        </span>
+                        <span className="text-[10px] text-sky-400 font-mono font-bold block truncate">
+                          {inspectedEntryCircle.grade || '99% A+ INSTITUTIONAL SNIPER'}
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setInspectedEntryCircle(null)}
+                      aria-label="Close entry blueprint"
+                      className="w-7 h-7 rounded-lg bg-[#2A2E39] hover:bg-[#363A45] text-[#94A3B8] hover:text-white flex items-center justify-center shrink-0 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 space-y-3">
+                    {/* Key Numbers Grid: Exact Entry, SL, TP, RR */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 p-2 rounded-xl bg-[#0E1118] border border-[#2A2E39] font-mono text-[11px]">
+                      <div>
+                        <div className="text-[9px] text-[#787B86]">DIRECTION</div>
+                        <div className="font-extrabold" style={{ color: entryColor }}>
+                          {pred.direction}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[9px] text-sky-400 font-bold">🎯 EXACT ENTRY</div>
+                        <div className="font-extrabold text-white">{pred.entryPrice.toFixed(decimals)}</div>
+                      </div>
+                      <div>
+                        <div className="text-[9px] text-[#FF1744] font-bold">🛡️ SAFE SL</div>
+                        <div className="font-bold text-[#FF1744]">{pred.stopLoss.toFixed(decimals)}</div>
+                      </div>
+                      <div>
+                        <div className="text-[9px] text-[#00E676] font-bold">🏆 TARGET TP</div>
+                        <div className="font-bold text-[#00E676]">
+                          {pred.takeProfit1.toFixed(decimals)} (1:{pred.riskRewardRatio}R)
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Exact Entry Instruction */}
+                    <div className="p-2.5 rounded-xl bg-sky-500/10 border border-sky-400/30 space-y-1">
+                      <div className="text-[11px] font-bold text-sky-300 flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-sky-400" />
+                        <span>
+                          {aiLanguage === 'en'
+                            ? '⚡ Exact Entry Trigger Rule:'
+                            : '⚡ কখন ও কীভাবে পারফেক্ট এন্ট্রি নিবেন:'}
+                        </span>
+                      </div>
+                      <div className="text-xs text-[#E2E8F0] leading-relaxed">
                         {aiLanguage === 'en'
-                          ? '🎯 Perfect Entry Place & Execution Blueprint'
-                          : '🎯 সঠিক এন্ট্রি নেওয়ার নির্দিষ্ট স্থান ও ট্রেড রুলস'}
+                          ? `Pull the trigger at precisely ${pred.entryPrice.toFixed(decimals)} on candle close confirmation. Do NOT enter mid-candle while wicks are still forming to eliminate false stop-out hunts!`
+                          : `এই ক্যান্ডেলের বডি ক্লোজ হওয়ার সাথে সাথে ঠিক ${pred.entryPrice.toFixed(decimals)} প্রাইসে এন্ট্রি নিবেন। ক্যান্ডেল চলাকালীন উইক গঠন অবস্থায় তাড়াহুড়া করে কখনো এন্ট্রি নিবেন না, তাহলে মার্কেট ফেকআউট দিয়ে এসএল খেয়ে ফেলতে পারে।`}
+                      </div>
+                    </div>
+
+                    {/* Safe SL Explanation */}
+                    <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 space-y-1">
+                      <div className="text-[11px] font-bold text-rose-400 flex items-center gap-1.5">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>
+                          {aiLanguage === 'en'
+                            ? '🛡️ Why Stop Loss is Protected Here:'
+                            : '🛡️ কেন স্টপ লস এখানে সুরক্ষিত (ফেকআউট এড়ানোর উপায়):'}
+                        </span>
+                      </div>
+                      <div className="text-xs text-[#D1D4DC] leading-relaxed">
+                        {inspectedEntryCircle.riskManagementGuide?.whySlIsSafeHere ||
+                          `স্টপ লস সুইং পয়েন্টের বাইরে নিরাপদ বাফার দিয়ে সেট করা হয়েছে। প্রাতিষ্ঠানিক লিকুইডিটি হান্ট উইক আগেই হয়ে যাওয়ায় এই এসএল হিট হওয়ার ঝুঁকি অত্যন্ত কম।`}
+                      </div>
+                    </div>
+
+                    {/* Profit Booking & Breakeven Rule */}
+                    <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 space-y-1">
+                      <div className="text-[11px] font-bold text-emerald-400 flex items-center gap-1.5">
+                        <Flame className="w-3.5 h-3.5 text-amber-400" />
+                        <span>
+                          {aiLanguage === 'en'
+                            ? '🎯 Profit Taking & Breakeven Guide:'
+                            : '🎯 প্রফিট বুকিং ও রিস্ক-ফ্রি ট্রেডিং নিয়ম:'}
+                        </span>
+                      </div>
+                      <div className="text-xs text-[#D1D4DC] leading-relaxed">
+                        {inspectedEntryCircle.riskManagementGuide?.breakevenRule ||
+                          `মার্কেট ১:১.৫ আর মুভ করলে সাথে সাথে স্টপ লস এন্ট্রি প্রাইসে (Breakeven) সরিয়ে আনবেন এবং TP1 এ ৫০% প্রফিট বুক করবেন।`}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Pinned 1-Click Action Footer */}
+                  <div className="shrink-0 px-4 py-3 border-t border-[#2A2E39] bg-[#181C27] flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onStartDraftOrder(pred.direction === 'BUY' ? 'LONG' : 'SHORT');
+                        onUpdateDraftEntry?.(pred.entryPrice);
+                        onUpdateDraftSl(pred.stopLoss);
+                        onUpdateDraftTp(pred.takeProfit1);
+                        setInspectedEntryCircle(null);
+                      }}
+                      className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-emerald-500 hover:from-sky-400 hover:to-emerald-400 text-slate-950 font-extrabold text-xs flex items-center justify-center gap-2 shadow-xl cursor-pointer active:scale-95 transition-all"
+                    >
+                      <Zap className="w-3.5 h-3.5" />
+                      <span>
+                        {aiLanguage === 'en'
+                          ? '⚡ Load Perfect Entry into Order Ticket'
+                          : '⚡ এই এন্ট্রিতে এখনই অর্ডার টিকেট ওপেন করুন'}
                       </span>
-                      <span className="text-[10px] text-sky-400 font-mono font-bold">
-                        {inspectedEntryCircle.grade || '99% A+ INSTITUTIONAL SNIPER'}
-                      </span>
-                    </div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setInspectedEntryCircle(null)}
+                      className="px-3.5 py-2.5 rounded-xl bg-[#2A2E39] text-[#94A3B8] hover:text-white text-xs cursor-pointer"
+                    >
+                      Close
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setInspectedEntryCircle(null)}
-                    className="text-[#787B86] hover:text-white p-1 cursor-pointer"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-
-                {/* Key Numbers Grid: Exact Entry, SL, TP, RR */}
-                <div className="grid grid-cols-4 gap-1.5 p-2 rounded-xl bg-[#0E1118] border border-[#2A2E39] font-mono text-[11px]">
-                  <div>
-                    <div className="text-[9px] text-[#787B86]">DIRECTION</div>
-                    <div className="font-extrabold" style={{ color: entryColor }}>
-                      {pred.direction}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-[9px] text-sky-400 font-bold">🎯 EXACT ENTRY</div>
-                    <div className="font-extrabold text-white">{pred.entryPrice.toFixed(decimals)}</div>
-                  </div>
-                  <div>
-                    <div className="text-[9px] text-[#FF1744] font-bold">🛡️ SAFE SL</div>
-                    <div className="font-bold text-[#FF1744]">{pred.stopLoss.toFixed(decimals)}</div>
-                  </div>
-                  <div>
-                    <div className="text-[9px] text-[#00E676] font-bold">🏆 TARGET TP</div>
-                    <div className="font-bold text-[#00E676]">
-                      {pred.takeProfit1.toFixed(decimals)} (1:{pred.riskRewardRatio}R)
-                    </div>
-                  </div>
-                </div>
-
-                {/* Exact Entry Instruction (When & Where to Enter) */}
-                <div className="p-2.5 rounded-xl bg-sky-500/10 border border-sky-400/30 space-y-1">
-                  <div className="text-[11px] font-bold text-sky-300 flex items-center gap-1.5">
-                    <Sparkles className="w-3.5 h-3.5 text-sky-400" />
-                    <span>
-                      {aiLanguage === 'en'
-                        ? '⚡ Exact Entry Trigger Rule:'
-                        : '⚡ কখন ও কীভাবে পারফেক্ট এন্ট্রি নিবেন:'}
-                    </span>
-                  </div>
-                  <div className="text-xs text-[#E2E8F0] leading-relaxed">
-                    {aiLanguage === 'en'
-                      ? `Pull the trigger at precisely ${pred.entryPrice.toFixed(decimals)} on candle close confirmation. Do NOT enter mid-candle while wicks are still forming to eliminate false stop-out hunts!`
-                      : `এই ক্যান্ডেলের বডি ক্লোজ হওয়ার সাথে সাথে ঠিক ${pred.entryPrice.toFixed(decimals)} প্রাইসে এন্ট্রি নিবেন। ক্যান্ডেল চলাকালীন উইক গঠন অবস্থায় তাড়াহুড়া করে কখনো এন্ট্রি নিবেন না, তাহলে মার্কেট ফেকআউট দিয়ে এসএল খেয়ে ফেলতে পারে।`}
-                  </div>
-                </div>
-
-                {/* Safe SL Explanation (Avoiding premature stopouts) */}
-                <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 space-y-1">
-                  <div className="text-[11px] font-bold text-rose-400 flex items-center gap-1.5">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>
-                      {aiLanguage === 'en'
-                        ? '🛡️ Why Stop Loss is Protected Here:'
-                        : '🛡️ কেন স্টপ লস এখানে সুরক্ষিত (ফেকআউট এড়ানোর উপায়):'}
-                    </span>
-                  </div>
-                  <div className="text-xs text-[#D1D4DC] leading-relaxed">
-                    {inspectedEntryCircle.riskManagementGuide?.whySlIsSafeHere ||
-                      `স্টপ লস সুইং পয়েন্টের বাইরে নিরাপদ বাফার দিয়ে সেট করা হয়েছে। প্রাতিষ্ঠানিক লিকুইডিটি হান্ট উইক আগেই হয়ে যাওয়ায় এই এসএল হিট হওয়ার ঝুঁকি অত্যন্ত কম।`}
-                  </div>
-                </div>
-
-                {/* Profit Booking & Breakeven Rule */}
-                <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 space-y-1">
-                  <div className="text-[11px] font-bold text-emerald-400 flex items-center gap-1.5">
-                    <Flame className="w-3.5 h-3.5 text-amber-400" />
-                    <span>
-                      {aiLanguage === 'en'
-                        ? '🎯 Profit Taking & Breakeven Guide:'
-                        : '🎯 প্রফিট বুকিং ও রিস্ক-ফ্রি ট্রেডিং নিয়ম:'}
-                    </span>
-                  </div>
-                  <div className="text-xs text-[#D1D4DC] leading-relaxed">
-                    {inspectedEntryCircle.riskManagementGuide?.breakevenRule ||
-                      `মার্কেট ১:১.৫ আর মুভ করলে সাথে সাথে স্টপ লস এন্ট্রি প্রাইসে (Breakeven) সরিয়ে আনবেন এবং TP1 এ ৫০% প্রফিট বুক করবেন।`}
-                  </div>
-                </div>
-
-                {/* 1-Click Action Execution */}
-                <div className="pt-1 flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onStartDraftOrder(pred.direction === 'BUY' ? 'LONG' : 'SHORT');
-                      onUpdateDraftEntry?.(pred.entryPrice);
-                      onUpdateDraftSl(pred.stopLoss);
-                      onUpdateDraftTp(pred.takeProfit1);
-                      setInspectedEntryCircle(null);
-                    }}
-                    className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-emerald-500 hover:from-sky-400 hover:to-emerald-400 text-slate-950 font-extrabold text-xs flex items-center justify-center gap-2 shadow-xl cursor-pointer active:scale-95 transition-all"
-                  >
-                    <Zap className="w-3.5 h-3.5" />
-                    <span>
-                      {aiLanguage === 'en'
-                        ? '⚡ Load Perfect Entry into Order Ticket (1-Click)'
-                        : '⚡ এই এন্ট্রিতে এখনই অর্ডার টিকেট ওপেন করুন'}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setInspectedEntryCircle(null)}
-                    className="px-3.5 py-2.5 rounded-xl bg-[#2A2E39] text-[#94A3B8] hover:text-white text-xs cursor-pointer"
-                  >
-                    Close
-                  </button>
                 </div>
               </div>
             );
@@ -3289,109 +3350,114 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
           {/* ON-CHART FLOATING MASTERCLASS EDUCATIONAL LESSON CARD (BACKTEST MENTOR) */}
           {activeLesson && (
-            <div className="absolute top-16 left-1/2 -translate-x-1/2 z-40 w-[480px] max-w-[94vw] max-h-[78vh] overflow-y-auto rounded-2xl bg-[#181C27]/98 border-2 border-[#AB47BC] shadow-2xl p-4 space-y-3 backdrop-blur-xl select-none">
-              <div className="flex items-center justify-between border-b border-[#2A2E39] pb-2">
-                <div className="flex items-center gap-2">
-                  <span className="p-1.5 rounded-lg bg-[#AB47BC]/20 text-[#E1BEE7]">
-                    <BookOpen className="w-4 h-4" />
-                  </span>
-                  <div>
-                    <span className="font-extrabold text-white text-xs block">
-                      {aiLanguage === 'en' ? activeLesson.titleEn : activeLesson.titleBn}
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/70 backdrop-blur-sm">
+              <div className="w-[480px] max-w-full max-h-[88vh] rounded-2xl bg-[#181C27] border-2 border-[#AB47BC] shadow-2xl flex flex-col overflow-hidden select-none">
+                <div className="shrink-0 px-4 py-3 border-b border-[#2A2E39] bg-[#131722] flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="p-1.5 rounded-lg bg-[#AB47BC]/20 text-[#E1BEE7] shrink-0">
+                      <BookOpen className="w-4 h-4" />
                     </span>
-                    <span className="text-[10px] text-[#FFB300] font-mono">
-                      Master Backtest Lesson #{activeLesson.lessonNumber}
-                    </span>
+                    <div className="min-w-0">
+                      <span className="font-extrabold text-white text-xs block truncate">
+                        {aiLanguage === 'en' ? activeLesson.titleEn : activeLesson.titleBn}
+                      </span>
+                      <span className="text-[10px] text-[#FFB300] font-mono block truncate">
+                        Master Backtest Lesson #{activeLesson.lessonNumber}
+                      </span>
+                    </div>
                   </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={closeLesson}
-                  className="text-[#787B86] hover:text-white p-1 cursor-pointer"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-
-              {/* Trade Execution Metrics */}
-              <div className="grid grid-cols-4 gap-1.5 p-2 rounded-xl bg-[#131722] border border-[#2A2E39] font-mono text-[11px]">
-                <div>
-                  <div className="text-[9px] text-[#787B86]">DIRECTION</div>
-                  <div className={`font-extrabold ${activeLesson.direction === 'BUY' ? 'text-[#00E676]' : 'text-[#F23645]'}`}>
-                    {activeLesson.direction}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[9px] text-[#787B86]">ENTRY</div>
-                  <div className="font-bold text-[#60A5FA]">{activeLesson.entryPrice.toFixed(decimals)}</div>
-                </div>
-                <div>
-                  <div className="text-[9px] text-[#787B86]">STOP LOSS</div>
-                  <div className="font-bold text-[#F23645]">{activeLesson.stopLoss.toFixed(decimals)}</div>
-                </div>
-                <div>
-                  <div className="text-[9px] text-[#787B86]">TARGET TP</div>
-                  <div className="font-bold text-[#00E676]">{activeLesson.takeProfit.toFixed(decimals)} (1:{activeLesson.rrRatio}R)</div>
-                </div>
-              </div>
-
-              {/* Why Trade Here (Institutional Confluences) */}
-              <div className="space-y-1">
-                <div className="text-[11px] font-bold text-[#00E676] flex items-center gap-1.5">
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                  <span>{aiLanguage === 'en' ? 'Why Enter Trade Here?' : 'কেন এখানে ট্রেড নেওয়া হলো?'}</span>
-                </div>
-                {(aiLanguage === 'en' ? activeLesson.reasonsEn : activeLesson.reasonsBn).map((r, i) => (
-                  <div key={i} className="text-xs text-[#D1D4DC] pl-4 border-l-2 border-[#00E676]/40 leading-relaxed">
-                    {r}
-                  </div>
-                ))}
-              </div>
-
-              {/* Confirmation Candle Signature */}
-              <div className="p-2.5 rounded-xl bg-[#2962FF]/10 border border-[#2962FF]/30 space-y-1">
-                <div className="text-[11px] font-bold text-[#60A5FA] flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>{aiLanguage === 'en' ? 'Confirmation Candle Signature:' : 'কনফার্মেশন ক্যান্ডেল সিগনেচার:'}</span>
-                </div>
-                <div className="text-xs text-[#D1D4DC] leading-relaxed">
-                  {aiLanguage === 'en' ? activeLesson.signatureWickEn : activeLesson.signatureWickBn}
-                </div>
-              </div>
-
-              {/* Golden Rule / Trader Takeaway */}
-              <div className="p-2.5 rounded-xl bg-[#FFB300]/10 border border-[#FFB300]/30 space-y-1">
-                <div className="text-[11px] font-bold text-[#FFB300] flex items-center gap-1.5">
-                  <Flame className="w-3.5 h-3.5" />
-                  <span>{aiLanguage === 'en' ? 'Golden Rule / Key Takeaway:' : 'কী শিখলাম? (গোল্ডেন রুল)'}</span>
-                </div>
-                <div className="text-xs text-[#D1D4DC] leading-relaxed">
-                  {aiLanguage === 'en' ? activeLesson.goldenRuleEn : activeLesson.goldenRuleBn}
-                </div>
-              </div>
-
-              {/* Action Buttons */}
-              <div className="pt-1 flex items-center gap-2">
-                {onReplayFromLesson && (
                   <button
                     type="button"
-                    onClick={() => {
-                      onReplayFromLesson(activeLesson);
-                      closeLesson();
-                    }}
-                    className="flex-1 py-2 rounded-xl bg-[#AB47BC] hover:bg-[#8E24AA] text-white font-extrabold text-xs flex items-center justify-center gap-2 shadow-lg cursor-pointer"
+                    onClick={closeLesson}
+                    aria-label="Close lesson"
+                    className="w-7 h-7 rounded-lg bg-[#2A2E39] hover:bg-[#363A45] text-[#94A3B8] hover:text-white flex items-center justify-center shrink-0 cursor-pointer"
                   >
-                    <Play className="w-3.5 h-3.5" />
-                    <span>{aiLanguage === 'en' ? 'Jump to Candle & Practice Replay' : 'এই ক্যান্ডেলে যান এবং রিপ্লে দিয়ে প্র্যাকটিস করুন'}</span>
+                    <X className="w-4 h-4" />
                   </button>
-                )}
-                <button
-                  type="button"
-                  onClick={closeLesson}
-                  className="px-4 py-2 rounded-xl bg-[#2A2E39] text-[#94A3B8] hover:text-white text-xs cursor-pointer"
-                >
-                  Close
-                </button>
+                </div>
+
+                <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 space-y-3">
+                  {/* Trade Execution Metrics */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 p-2 rounded-xl bg-[#131722] border border-[#2A2E39] font-mono text-[11px]">
+                    <div>
+                      <div className="text-[9px] text-[#787B86]">DIRECTION</div>
+                      <div className={`font-extrabold ${activeLesson.direction === 'BUY' ? 'text-[#00E676]' : 'text-[#F23645]'}`}>
+                        {activeLesson.direction}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[9px] text-[#787B86]">ENTRY</div>
+                      <div className="font-bold text-[#60A5FA]">{activeLesson.entryPrice.toFixed(decimals)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[9px] text-[#787B86]">STOP LOSS</div>
+                      <div className="font-bold text-[#F23645]">{activeLesson.stopLoss.toFixed(decimals)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[9px] text-[#787B86]">TARGET TP</div>
+                      <div className="font-bold text-[#00E676]">{activeLesson.takeProfit.toFixed(decimals)} (1:{activeLesson.rrRatio}R)</div>
+                    </div>
+                  </div>
+
+                  {/* Why Trade Here (Institutional Confluences) */}
+                  <div className="space-y-1">
+                    <div className="text-[11px] font-bold text-[#00E676] flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>{aiLanguage === 'en' ? 'Why Enter Trade Here?' : 'কেন এখানে ট্রেড নেওয়া হলো?'}</span>
+                    </div>
+                    {(aiLanguage === 'en' ? activeLesson.reasonsEn : activeLesson.reasonsBn).map((r, i) => (
+                      <div key={i} className="text-xs text-[#D1D4DC] pl-4 border-l-2 border-[#00E676]/40 leading-relaxed">
+                        {r}
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Confirmation Candle Signature */}
+                  <div className="p-2.5 rounded-xl bg-[#2962FF]/10 border border-[#2962FF]/30 space-y-1">
+                    <div className="text-[11px] font-bold text-[#60A5FA] flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>{aiLanguage === 'en' ? 'Confirmation Candle Signature:' : 'কনফার্মেশন ক্যান্ডেল সিগনেচার:'}</span>
+                    </div>
+                    <div className="text-xs text-[#D1D4DC] leading-relaxed">
+                      {aiLanguage === 'en' ? activeLesson.signatureWickEn : activeLesson.signatureWickBn}
+                    </div>
+                  </div>
+
+                  {/* Golden Rule / Trader Takeaway */}
+                  <div className="p-2.5 rounded-xl bg-[#FFB300]/10 border border-[#FFB300]/30 space-y-1">
+                    <div className="text-[11px] font-bold text-[#FFB300] flex items-center gap-1.5">
+                      <Flame className="w-3.5 h-3.5" />
+                      <span>{aiLanguage === 'en' ? 'Golden Rule / Key Takeaway:' : 'কী শিখলাম? (গোল্ডেন রুল)'}</span>
+                    </div>
+                    <div className="text-xs text-[#D1D4DC] leading-relaxed">
+                      {aiLanguage === 'en' ? activeLesson.goldenRuleEn : activeLesson.goldenRuleBn}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Pinned Action Footer */}
+                <div className="shrink-0 px-4 py-3 border-t border-[#2A2E39] bg-[#131722] flex items-center gap-2">
+                  {onReplayFromLesson && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onReplayFromLesson(activeLesson);
+                        closeLesson();
+                      }}
+                      className="flex-1 py-2 rounded-xl bg-[#AB47BC] hover:bg-[#8E24AA] text-white font-extrabold text-xs flex items-center justify-center gap-2 shadow-lg cursor-pointer"
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      <span>{aiLanguage === 'en' ? 'Jump to Candle & Practice Replay' : 'এই ক্যান্ডেলে যান এবং রিপ্লে দিয়ে প্র্যাকটিস করুন'}</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={closeLesson}
+                    className="px-4 py-2 rounded-xl bg-[#2A2E39] text-[#94A3B8] hover:text-white text-xs cursor-pointer"
+                  >
+                    Close
+                  </button>
+                </div>
               </div>
             </div>
           )}

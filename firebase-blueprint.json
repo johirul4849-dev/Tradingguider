@@ -9,7 +9,7 @@
         "displayName": { "type": "string", "maxLength": 120 },
         "email": { "type": "string", "format": "email", "maxLength": 254 },
         "photoURL": { "type": "string", "maxLength": 1024 },
-        "preferredMarket": { "type": "string", "enum": ["BTC/USD", "XAU/USD", "BOTH"], "maxLength": 20 },
+        "preferredMarket": { "type": "string", "maxLength": 20, "pattern": "^[A-Z0-9/]+$" },
         "preferredTimeframe": { "type": "string", "enum": ["1m", "5m", "15m", "30m", "1H", "4H", "1D"], "maxLength": 10 },
         "experienceLevel": { "type": "string", "enum": ["Beginner", "Intermediate", "Advanced"], "maxLength": 20 },
         "mainGoal": { "type": "string", "maxLength": 100 },
@@ -54,7 +54,7 @@
       "properties": {
         "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "instrument": { "type": "string", "enum": ["BTC/USD", "XAU/USD"], "maxLength": 20 },
+        "instrument": { "type": "string", "maxLength": 20, "pattern": "^[A-Z0-9/]+$" },
         "timeframe": { "type": "string", "maxLength": 10 },
         "mode": { "type": "string", "enum": ["REPLAY", "TERMINAL", "LIVE"], "maxLength": 20 },
         "direction": { "type": "string", "enum": ["LONG", "SHORT"], "maxLength": 10 },
@@ -161,6 +161,24 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "userId", "moduleId", "category", "completed", "quizScore", "updatedAt"]
+    },
+    "UserSubscription": {
+      "title": "UserSubscription",
+      "description": "User 24-hour free trial, Binance payment submission, and admin-approved subscription record.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 254 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "firstLoginAt": { "type": "number" },
+        "freeTrialExpiresAt": { "type": "number" },
+        "status": { "type": "string", "enum": ["TRIAL_ACTIVE", "TRIAL_EXPIRED", "PENDING_APPROVAL", "ACTIVE_SUBSCRIBED"], "maxLength": 30 },
+        "activePackageId": { "type": "string", "enum": ["MONTH_1", "MONTH_6", "MONTH_12"], "maxLength": 20 },
+        "subscriptionExpiresAt": { "type": "number" },
+        "lastPaymentSubmission": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "firstLoginAt", "freeTrialExpiresAt", "status"]
     }
   },
   "firestore": {
@@ -183,6 +201,10 @@
     "/users/{userId}/trainingProgress/{progressId}": {
       "schema": { "$ref": "#/entities/TrainingProgress" },
       "description": "Course completion and challenge progress records."
+    },
+    "/subscriptions/{userId}": {
+      "schema": { "$ref": "#/entities/UserSubscription" },
+      "description": "User 24h free trial, Binance payment requests, and admin-approved subscription countdowns."
     }
   }
 }

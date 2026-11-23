@@ -1,4 +1,10 @@
-import { BRAND_CONFIG, SupportedSymbol, SupportedTimeframe } from '../config/brand';
+import {
+  ALL_SUPPORTED_SYMBOLS,
+  BRAND_CONFIG,
+  getMarketSessionStatus,
+  SupportedSymbol,
+  SupportedTimeframe,
+} from '../config/brand';
 
 export interface CandleData {
   time: number; // Unix seconds
@@ -7,6 +13,38 @@ export interface CandleData {
   low: number;
   close: number;
   volume: number;
+}
+
+export function inferDecimals(candles: CandleData[], symbol?: SupportedSymbol): number {
+  if (symbol && BRAND_CONFIG.markets[symbol]) {
+    return BRAND_CONFIG.markets[symbol].decimals;
+  }
+  const sample = candles[candles.length - 1]?.close || candles[0]?.close || 100;
+  if (sample < 5) return 5;
+  if (sample < 500) return 3;
+  return 2;
+}
+
+function getEffectiveSessionNowSec(symbol: SupportedSymbol, stepSec: number): number {
+  const nowMs = Date.now();
+  const session = getMarketSessionStatus(symbol, nowMs);
+  if (session.isOpen) {
+    return Math.floor(nowMs / 1000 / stepSec) * stepSec;
+  }
+  // Market is closed (Fri 22:00 UTC -> Sun 22:00 UTC): anchor to most recent Friday 22:00 UTC close
+  const d = new Date(nowMs);
+  const utcDay = d.getUTCDay();
+  const daysSinceFriday = utcDay === 5 ? 0 : utcDay === 6 ? 1 : 2;
+  const friCloseMs = Date.UTC(
+    d.getUTCFullYear(),
+    d.getUTCMonth(),
+    d.getUTCDate() - daysSinceFriday,
+    22,
+    0,
+    0,
+    0
+  );
+  return Math.floor(friCloseMs / 1000 / stepSec) * stepSec;
 }
 
 export interface IndicatorConfig {
@@ -83,7 +121,7 @@ export class MarketDataProvider {
   }
 
   static getSupportedSymbols(): SupportedSymbol[] {
-    return ['BTC/USD', 'XAU/USD'];
+    return [...ALL_SUPPORTED_SYMBOLS];
   }
 
   static getTimeframes(): SupportedTimeframe[] {
@@ -91,37 +129,37 @@ export class MarketDataProvider {
   }
 
   /**
-   * Generates authentic baseline historical series for initial instant mount.
+   * Generates authentic baseline historical series for initial instant mount,
+   * scaled precisely to symbol decimals and anchored to Friday close if Forex market is closed.
    */
   static getThreeMonthCandles(
     symbol: SupportedSymbol,
     timeframe: SupportedTimeframe,
     totalCount = 1000
   ): CandleData[] {
-    const isGold = symbol === 'XAU/USD';
-
-    // Real baseline price anchor (London Spot Gold $4,165 / BTC $86,200)
-    const basePrice = isGold ? 4165.0 : 86200.0;
+    const meta = BRAND_CONFIG.markets[symbol] || BRAND_CONFIG.markets['BTC/USD'];
+    const decimals = meta.decimals;
+    const basePrice = meta.defaultPrice;
     const stepSec = TIMEFRAME_SECONDS[timeframe] || 900;
-    const nowSec = Math.floor(Date.now() / stepSec) * stepSec;
+    const nowSec = getEffectiveSessionNowSec(symbol, stepSec);
     const baseTime = nowSec - (totalCount - 1) * stepSec;
-    const volatilityStep = isGold ? 1.8 : 85.0;
+    const volatilityStep = Math.max(meta.tickSize * 8, meta.defaultBracketDistance * 0.22);
 
     const candles: CandleData[] = [];
     let cur = basePrice;
     for (let i = 0; i < totalCount; i++) {
       const delta = (Math.sin(i * 0.12) + Math.sin(i * 0.03) * 1.5) * volatilityStep;
-      const open = Number(cur.toFixed(2));
-      const close = Number((cur + delta * 0.15).toFixed(2));
-      const high = Number((Math.max(open, close) + Math.abs(delta) * 0.4).toFixed(2));
-      const low = Number((Math.min(open, close) - Math.abs(delta) * 0.4).toFixed(2));
+      const open = Number(cur.toFixed(decimals));
+      const close = Number((cur + delta * 0.15).toFixed(decimals));
+      const high = Number((Math.max(open, close) + Math.abs(delta) * 0.4).toFixed(decimals));
+      const low = Number((Math.min(open, close) - Math.abs(delta) * 0.4).toFixed(decimals));
       candles.push({
         time: baseTime + i * stepSec,
         open,
         high,
         low,
         close,
-        volume: isGold ? 150 : 80,
+        volume: meta.category === 'Crypto' ? 80 : 150,
       });
       cur = close;
     }
@@ -129,9 +167,9 @@ export class MarketDataProvider {
   }
 
   /**
-   * Fetches real original pairs (BTC/USD and Gold XAU/USD) with authentic market history.
-   * Works seamlessly on Vercel, Netlify, and Google Studio without any API key by using
-   * high-speed public CORS endpoints (Binance Vision unblocked mirror, Binance API, Coinbase, Gold-API).
+   * Fetches real original pairs (25 Forex Pairs, Gold, Silver, BTC/USD) with authentic market history.
+   * Forex & Metals route via /api/market/history (Yahoo Finance institutional feed), while BTC/USD & Gold
+   * also use high-speed Binance Vision / Coinbase / Gold-API sources.
    */
   static async fetchThreeMonthHistoryAndLive(
     symbol: SupportedSymbol,
@@ -144,23 +182,33 @@ export class MarketDataProvider {
     high24h: number;
     low24h: number;
     isLive: boolean;
+    marketOpen?: boolean;
+    marketStatusLabel?: string;
+    countdownText?: string;
     source: string;
     candles: CandleData[];
   }> {
-    // 1. Direct In-Browser Multi-Source Fetcher (Sub-200ms, CORS Enabled globally, 100% works on Vercel)
-    try {
-      const directData = await MarketDataProvider.fetchDirectBrowserKlines(symbol, timeframe);
-      if (directData && directData.candles && directData.candles.length >= 30) {
-        return directData;
-      }
-    } catch (err) {
-      console.warn('Direct in-browser fetch notice:', err);
+    const session = getMarketSessionStatus(symbol);
+
+    // For BTC/USD: try ultra-fast direct browser klines first, then local backend
+    if (symbol === 'BTC/USD') {
+      try {
+        const directData = await MarketDataProvider.fetchDirectBrowserKlines(symbol, timeframe);
+        if (directData && directData.candles && directData.candles.length >= 30) {
+          return {
+            ...directData,
+            marketOpen: session.isOpen,
+            marketStatusLabel: session.statusLabel,
+            countdownText: session.countdownText,
+          };
+        }
+      } catch (_err) {}
     }
 
-    // 2. Try local server endpoint if running (Google Studio dev server or Vercel serverless function)
+    // For ALL Forex pairs, Metals (XAU/USD, XAG/USD), and BTC fallback: query backend Yahoo/Multi-Source feed
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 1800);
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
       const res = await fetch(
         `/api/market/history?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`,
         { signal: controller.signal }
@@ -171,10 +219,13 @@ export class MarketDataProvider {
         const contentType = res.headers.get('content-type') || '';
         if (contentType.includes('application/json')) {
           const data = await res.json();
-          if (data.candles && Array.isArray(data.candles) && data.candles.length >= 30) {
+          if (data.candles && Array.isArray(data.candles) && data.candles.length >= 20) {
             return {
               ...data,
               isLive: true,
+              marketOpen: data.marketOpen ?? session.isOpen,
+              marketStatusLabel: data.marketStatusLabel ?? session.statusLabel,
+              countdownText: data.countdownText ?? session.countdownText,
               source: data.source || 'LIVE MULTI-SOURCE FEED',
             };
           }
@@ -184,11 +235,28 @@ export class MarketDataProvider {
       // ignore
     }
 
-    // 3. Fallback baseline
+    // Secondary browser fallback for XAU/USD when server unreachable
+    if (symbol === 'XAU/USD') {
+      try {
+        const directData = await MarketDataProvider.fetchDirectBrowserKlines(symbol, timeframe);
+        if (directData && directData.candles && directData.candles.length >= 30) {
+          return {
+            ...directData,
+            marketOpen: session.isOpen,
+            marketStatusLabel: session.statusLabel,
+            countdownText: session.countdownText,
+          };
+        }
+      } catch (_e) {}
+    }
+
+    // Final calibrated baseline
     const fallbackCandles = MarketDataProvider.getThreeMonthCandles(symbol, timeframe, 720);
     const last = fallbackCandles[fallbackCandles.length - 1];
     const prev24 = fallbackCandles[Math.max(0, fallbackCandles.length - 25)];
-    const changePct = Number((((last.close - prev24.close) / prev24.close) * 100).toFixed(2));
+    const changePct = prev24?.close
+      ? Number((((last.close - prev24.close) / prev24.close) * 100).toFixed(2))
+      : 0;
     return {
       symbol,
       timeframe,
@@ -196,8 +264,11 @@ export class MarketDataProvider {
       changePercent: changePct,
       high24h: Math.max(...fallbackCandles.slice(-24).map((c) => c.high)),
       low24h: Math.min(...fallbackCandles.slice(-24).map((c) => c.low)),
-      isLive: true,
-      source: 'ORIGINAL MARKET FEED',
+      isLive: false,
+      marketOpen: session.isOpen,
+      marketStatusLabel: session.statusLabel,
+      countdownText: session.countdownText,
+      source: 'CALIBRATED BASELINE FEED',
       candles: fallbackCandles,
     };
   }
@@ -349,18 +420,20 @@ export class MarketDataProvider {
 MarketDataProvider.purgeOldStaleCache();
 
 export function calculateSMA(candles: CandleData[], period: number, source: 'close' | 'open' | 'high' | 'low' = 'close') {
+  const dec = inferDecimals(candles);
   const result: { time: number; value: number }[] = [];
   for (let i = period - 1; i < candles.length; i++) {
     let sum = 0;
     for (let j = 0; j < period; j++) {
       sum += candles[i - j][source];
     }
-    result.push({ time: candles[i].time, value: Number((sum / period).toFixed(2)) });
+    result.push({ time: candles[i].time, value: Number((sum / period).toFixed(dec)) });
   }
   return result;
 }
 
 export function calculateEMA(candles: CandleData[], period: number, source: 'close' | 'open' | 'high' | 'low' = 'close') {
+  const dec = inferDecimals(candles);
   const result: { time: number; value: number }[] = [];
   if (candles.length < period) return result;
   const k = 2 / (period + 1);
@@ -369,16 +442,17 @@ export function calculateEMA(candles: CandleData[], period: number, source: 'clo
     ema += candles[i][source];
   }
   ema /= period;
-  result.push({ time: candles[period - 1].time, value: Number(ema.toFixed(2)) });
+  result.push({ time: candles[period - 1].time, value: Number(ema.toFixed(dec)) });
 
   for (let i = period; i < candles.length; i++) {
     ema = candles[i][source] * k + ema * (1 - k);
-    result.push({ time: candles[i].time, value: Number(ema.toFixed(2)) });
+    result.push({ time: candles[i].time, value: Number(ema.toFixed(dec)) });
   }
   return result;
 }
 
 export function calculateBollingerBands(candles: CandleData[], period = 20, mult = 2) {
+  const dec = inferDecimals(candles);
   const upper: { time: number; value: number }[] = [];
   const middle: { time: number; value: number }[] = [];
   const lower: { time: number; value: number }[] = [];
@@ -391,14 +465,15 @@ export function calculateBollingerBands(candles: CandleData[], period = 20, mult
     for (let j = 0; j < period; j++) sqDiff += Math.pow(candles[i - j].close - mean, 2);
     const stdDev = Math.sqrt(sqDiff / period);
     const t = candles[i].time;
-    middle.push({ time: t, value: Number(mean.toFixed(2)) });
-    upper.push({ time: t, value: Number((mean + mult * stdDev).toFixed(2)) });
-    lower.push({ time: t, value: Number((mean - mult * stdDev).toFixed(2)) });
+    middle.push({ time: t, value: Number(mean.toFixed(dec)) });
+    upper.push({ time: t, value: Number((mean + mult * stdDev).toFixed(dec)) });
+    lower.push({ time: t, value: Number((mean - mult * stdDev).toFixed(dec)) });
   }
   return { upper, middle, lower };
 }
 
 export function calculateVWAP(candles: CandleData[]) {
+  const dec = inferDecimals(candles);
   const result: { time: number; value: number }[] = [];
   let cumPV = 0;
   let cumVol = 0;
@@ -411,12 +486,13 @@ export function calculateVWAP(candles: CandleData[]) {
     const vol = Math.max(1, candles[i].volume);
     cumPV += typicalPrice * vol;
     cumVol += vol;
-    result.push({ time: candles[i].time, value: Number((cumPV / cumVol).toFixed(2)) });
+    result.push({ time: candles[i].time, value: Number((cumPV / cumVol).toFixed(dec)) });
   }
   return result;
 }
 
 export function calculateSuperTrend(candles: CandleData[], period = 10, multiplier = 2.6) {
+  const dec = inferDecimals(candles);
   const result: { time: number; value: number; direction: 1 | -1 }[] = [];
   if (candles.length < period + 2) return result;
 
@@ -444,7 +520,7 @@ export function calculateSuperTrend(candles: CandleData[], period = 10, multipli
 
     result.push({
       time: candles[i].time,
-      value: Number((trend === 1 ? lowerBand : upperBand).toFixed(2)),
+      value: Number((trend === 1 ? lowerBand : upperBand).toFixed(dec)),
       direction: trend,
     });
   }
@@ -505,11 +581,12 @@ export function detectSmcMarkersAndZones(candles: CandleData[]) {
     }
   }
 
+  const dec = inferDecimals(candles);
   const bandThickness = (swingHigh - swingLow) * 0.04;
   return {
     markers,
-    supportZone: { low: swingLow, high: Number((swingLow + bandThickness).toFixed(2)) },
-    resistanceZone: { low: Number((swingHigh - bandThickness).toFixed(2)), high: swingHigh },
+    supportZone: { low: swingLow, high: Number((swingLow + bandThickness).toFixed(dec)) },
+    resistanceZone: { low: Number((swingHigh - bandThickness).toFixed(dec)), high: swingHigh },
   };
 }
 
@@ -526,6 +603,7 @@ export function calculateLatestOscillatorSnapshot(candles: CandleData[]) {
     };
   }
 
+  const dec = inferDecimals(candles);
   let gains = 0;
   let losses = 0;
   const slice = candles.slice(-15);
@@ -546,7 +624,7 @@ export function calculateLatestOscillatorSnapshot(candles: CandleData[]) {
     const tr = Math.max(c.high - c.low, Math.abs(c.high - prevClose), Math.abs(c.low - prevClose));
     trSum += tr;
   }
-  const atr = Number((trSum / 14).toFixed(2));
+  const atr = Number((trSum / 14).toFixed(Math.max(dec, 4)));
 
   const ema12Arr = calculateEMA(candles.slice(-60), 12);
   const ema26Arr = calculateEMA(candles.slice(-60), 26);
@@ -556,7 +634,7 @@ export function calculateLatestOscillatorSnapshot(candles: CandleData[]) {
   const lastClose = candles[candles.length - 1].close;
   const e12 = ema12Arr[ema12Arr.length - 1]?.value || lastClose;
   const e26 = ema26Arr[ema26Arr.length - 1]?.value || lastClose;
-  const macd = Number((e12 - e26).toFixed(2));
+  const macd = Number((e12 - e26).toFixed(Math.max(dec, 4)));
 
   return {
     rsi,
@@ -781,14 +859,17 @@ export function detectHighImpactSMCZonesAndMarkers(candles: CandleData[]): HighI
     }
   }
 
+  const dec = inferDecimals(recent);
+
   // 2. Detect Break of Structure (BOS) and Change of Character (CHoCH)
   for (let i = 5; i < recent.length - 1; i++) {
     const prev5 = recent.slice(i - 5, i);
     const curr = recent[i];
     const swingH = Math.max(...prev5.map((c) => c.high));
     const swingL = Math.min(...prev5.map((c) => c.low));
+    const minCandleRange = curr.close * 0.0001;
 
-    if (curr.close > swingH && (curr.high - curr.low) > 0.05) {
+    if (curr.close > swingH && (curr.high - curr.low) > minCandleRange) {
       const isChoch = i >= 8 && recent[i - 8].close > recent[i - 2].close;
       if (isChoch) {
         result.chochLevels.push({
@@ -807,7 +888,7 @@ export function detectHighImpactSMCZonesAndMarkers(candles: CandleData[]): HighI
           label: 'BOS ↑',
         });
       }
-    } else if (curr.close < swingL && (curr.high - curr.low) > 0.05) {
+    } else if (curr.close < swingL && (curr.high - curr.low) > minCandleRange) {
       const isChoch = i >= 8 && recent[i - 8].close < recent[i - 2].close;
       if (isChoch) {
         result.chochLevels.push({
@@ -835,7 +916,7 @@ export function detectHighImpactSMCZonesAndMarkers(candles: CandleData[]): HighI
     const curr = recent[i];
     const prevLow = Math.min(...prevPool.map((c) => c.low));
     const prevHigh = Math.max(...prevPool.map((c) => c.high));
-    const range = curr.high - curr.low || 1;
+    const range = curr.high - curr.low || curr.close * 0.0005 || 1;
     const lowerWick = Math.min(curr.open, curr.close) - curr.low;
     const upperWick = curr.high - Math.max(curr.open, curr.close);
 
@@ -849,10 +930,10 @@ export function detectHighImpactSMCZonesAndMarkers(candles: CandleData[]): HighI
       });
 
       // Generate AI Bullish Confirmation Signal Candle
-      const entry = curr.close;
-      const sl = Number((curr.low - (curr.high - curr.low) * 0.4).toFixed(2));
-      const slDist = Math.max(0.1, entry - sl);
-      const tp = Number((entry + slDist * 3.2).toFixed(2));
+      const entry = Number(curr.close.toFixed(dec));
+      const sl = Number((curr.low - (curr.high - curr.low) * 0.4).toFixed(dec));
+      const slDist = Math.max(curr.close * 0.0002, entry - sl);
+      const tp = Number((entry + slDist * 3.2).toFixed(dec));
 
       result.aiSignals.push({
         id: `sig_bull_${curr.time}`,
@@ -883,10 +964,10 @@ export function detectHighImpactSMCZonesAndMarkers(candles: CandleData[]): HighI
       });
 
       // Generate AI Bearish Confirmation Signal Candle
-      const entry = curr.close;
-      const sl = Number((curr.high + (curr.high - curr.low) * 0.4).toFixed(2));
-      const slDist = Math.max(0.1, sl - entry);
-      const tp = Number((entry - slDist * 3.2).toFixed(2));
+      const entry = Number(curr.close.toFixed(dec));
+      const sl = Number((curr.high + (curr.high - curr.low) * 0.4).toFixed(dec));
+      const slDist = Math.max(curr.close * 0.0002, sl - entry);
+      const tp = Number((entry - slDist * 3.2).toFixed(dec));
 
       result.aiSignals.push({
         id: `sig_bear_${curr.time}`,
@@ -1130,18 +1211,21 @@ export function getHistoricalTradeLessons(
     },
   ];
 
+  const meta = BRAND_CONFIG.markets[symbol] || BRAND_CONFIG.markets['BTC/USD'];
+  const dec = meta.decimals;
+
   indices.forEach((idx, i) => {
     const item = lessonsCatalog[i % lessonsCatalog.length];
     const triggerCandle = candles[idx];
     if (!triggerCandle) return;
 
     const slice = candles.slice(Math.max(0, idx - 18), Math.min(candles.length, idx + 14));
-    const delta = isGold ? 5.2 : 340;
+    const delta = meta.defaultBracketDistance;
     const isBuy = item.dir === 'BUY';
-    const entry = Number(triggerCandle.close.toFixed(2));
-    const sl = Number((isBuy ? triggerCandle.low - delta * 0.85 : triggerCandle.high + delta * 0.85).toFixed(2));
-    const slDist = Math.max(0.1, Math.abs(entry - sl));
-    const tp = Number((isBuy ? entry + slDist * item.rr : entry - slDist * item.rr).toFixed(2));
+    const entry = Number(triggerCandle.close.toFixed(dec));
+    const sl = Number((isBuy ? triggerCandle.low - delta * 0.85 : triggerCandle.high + delta * 0.85).toFixed(dec));
+    const slDist = Math.max(meta.tickSize * 5, Math.abs(entry - sl));
+    const tp = Number((isBuy ? entry + slDist * item.rr : entry - slDist * item.rr).toFixed(dec));
 
     lessons.push({
       id: `lesson_${i + 1}_${triggerCandle.time}`,
@@ -1170,6 +1254,7 @@ export function getHistoricalTradeLessons(
 }
 
 export function calculatePivotPoints(candles: CandleData[]): PivotPointsData {
+  const dec = inferDecimals(candles);
   if (candles.length < 24) {
     const p = candles[candles.length - 1]?.close || 1000;
     return { p, r1: p * 1.01, r2: p * 1.02, s1: p * 0.99, s2: p * 0.98 };
@@ -1186,11 +1271,11 @@ export function calculatePivotPoints(candles: CandleData[]): PivotPointsData {
   const s2 = p - (high - low);
 
   return {
-    p: Number(p.toFixed(2)),
-    r1: Number(r1.toFixed(2)),
-    r2: Number(r2.toFixed(2)),
-    s1: Number(s1.toFixed(2)),
-    s2: Number(s2.toFixed(2)),
+    p: Number(p.toFixed(dec)),
+    r1: Number(r1.toFixed(dec)),
+    r2: Number(r2.toFixed(dec)),
+    s1: Number(s1.toFixed(dec)),
+    s2: Number(s2.toFixed(dec)),
   };
 }
 
@@ -1389,6 +1474,9 @@ export function findAiTechniqueSetups(
     },
   ];
 
+  const meta = BRAND_CONFIG.markets[symbol] || BRAND_CONFIG.markets['BTC/USD'];
+  const dec = meta.decimals;
+
   indices.forEach((targetIdx, i) => {
     const preset = presets[i % presets.length];
     const anchorCandle = candles[targetIdx];
@@ -1399,11 +1487,11 @@ export function findAiTechniqueSetups(
     const slice = candles.slice(sliceStart, sliceEnd);
 
     const price = anchorCandle.close;
-    const delta = isGold ? 5.5 : 320;
+    const delta = meta.defaultBracketDistance;
     const isBuy = preset.dir === 'BUY';
-    const entry = Number(price.toFixed(2));
-    const sl = Number((isBuy ? price - delta : price + delta).toFixed(2));
-    const tp = Number((isBuy ? price + delta * preset.avgRR : price - delta * preset.avgRR).toFixed(2));
+    const entry = Number(price.toFixed(dec));
+    const sl = Number((isBuy ? price - delta : price + delta).toFixed(dec));
+    const tp = Number((isBuy ? price + delta * preset.avgRR : price - delta * preset.avgRR).toFixed(dec));
 
     setups.push({
       id: `setup_${i + 1}_${targetIdx}`,
@@ -1449,43 +1537,41 @@ export function scanAiAutonomousPrediction(
   const recent = candles.slice(-30);
   const fvgs = detectFairValueGaps(candles);
   const osc = calculateLatestOscillatorSnapshot(candles);
-  const isGold = symbol === 'XAU/USD';
+  const meta = BRAND_CONFIG.markets[symbol] || BRAND_CONFIG.markets['BTC/USD'];
+  const dec = meta.decimals;
 
   const highs = recent.map((c) => c.high);
   const lows = recent.map((c) => c.low);
   const swingHigh = Math.max(...highs);
   const swingLow = Math.min(...lows);
-  const defaultAtr = isGold ? 4.2 : 210;
+  const defaultAtr = meta.defaultBracketDistance * 0.55;
   const atr = osc.atr > 0 ? osc.atr : defaultAtr;
 
-  const lastRange = Math.max(0.01, last.high - last.low);
+  const minRange = Math.max(meta.tickSize * 2, last.close * 0.00005);
+  const lastRange = Math.max(minRange, last.high - last.low);
   const lastLowerWick = Math.min(last.open, last.close) - last.low;
   const lastUpperWick = last.high - Math.max(last.open, last.close);
 
-  const prevRange = Math.max(0.01, prev1.high - prev1.low);
+  const prevRange = Math.max(minRange, prev1.high - prev1.low);
   const prevLowerWick = Math.min(prev1.open, prev1.close) - prev1.low;
   const prevUpperWick = prev1.high - Math.max(prev1.open, prev1.close);
 
-  // Check if candle shows genuine rejection of lower prices (long bottom wick or bullish engulfing)
   const isBullishRejection =
     (lastLowerWick >= lastRange * 0.36 && last.close >= last.open) ||
-    (prevLowerWick >= prevRange * 0.40 && last.close > prev1.high) ||
+    (prevLowerWick >= prevRange * 0.4 && last.close > prev1.high) ||
     (last.close > last.open && last.close > prev1.high && last.low <= prev1.low);
 
-  // Check if candle shows genuine rejection of higher prices (long upper wick or bearish engulfing)
   const isBearishRejection =
     (lastUpperWick >= lastRange * 0.36 && last.close <= last.open) ||
-    (prevUpperWick >= prevRange * 0.40 && last.close < prev1.low) ||
+    (prevUpperWick >= prevRange * 0.4 && last.close < prev1.low) ||
     (last.close < last.open && last.close < prev1.low && last.high >= prev1.high);
 
-  // Guard against waterfall crash (don't buy if last 3 candles are all strong red trend bars without lower wicks)
   const isCrashing =
     last.close < last.open &&
     prev1.close < prev1.open &&
     prev2.close < prev2.open &&
     lastLowerWick < lastRange * 0.25;
 
-  // Guard against rocket pump (don't sell if last 3 candles are all strong green trend bars without upper wicks)
   const isRocketing =
     last.close > last.open &&
     prev1.close > prev1.open &&
@@ -1497,15 +1583,16 @@ export function scanAiAutonomousPrediction(
 
   const distToLow = last.close - swingLow;
   const distToHigh = swingHigh - last.close;
-  const totalRange = swingHigh - swingLow || 1;
+  const totalRange = swingHigh - swingLow || minRange;
 
-  // Check recent swing low liquidity sweep (price dipped below recent low and bounced back above)
   const slice15 = recent.slice(-15);
   const lowestPriorToLast = Math.min(...slice15.slice(0, -1).map((c) => c.low));
   const sweptLow = last.low <= lowestPriorToLast && last.close > lowestPriorToLast;
 
   const highestPriorToLast = Math.max(...slice15.slice(0, -1).map((c) => c.high));
   const sweptHigh = last.high >= highestPriorToLast && last.close < highestPriorToLast;
+
+  const defaultLot = symbol === 'BTC/USD' ? 0.5 : symbol === 'XAU/USD' ? 0.2 : 1.0;
 
   // 1. HIGH-PROBABILITY BULLISH INSTITUTIONAL SETUP
   if (
@@ -1514,10 +1601,10 @@ export function scanAiAutonomousPrediction(
     (sweptLow || distToLow <= totalRange * 0.35) &&
     (hasUnmitigatedBullishFvg || osc.rsi <= 48 || sweptLow)
   ) {
-    const entry = Number(last.close.toFixed(2));
-    const sl = Number((Math.min(last.low, prev1.low) - atr * 0.75).toFixed(2));
-    const slDist = Math.max(0.1, entry - sl);
-    const tp = Number((entry + slDist * 3.0).toFixed(2));
+    const entry = Number(last.close.toFixed(dec));
+    const sl = Number((Math.min(last.low, prev1.low) - atr * 0.75).toFixed(dec));
+    const slDist = Math.max(meta.tickSize * 5, entry - sl);
+    const tp = Number((entry + slDist * 3.0).toFixed(dec));
 
     const confidences = [
       sweptLow ? 'Sell-side liquidity sweep & reclamation confirmed' : 'Price established support in 35% discount zone',
@@ -1538,7 +1625,7 @@ export function scanAiAutonomousPrediction(
       stopLoss: sl,
       takeProfit: tp,
       rrRatio: 3.0,
-      lotSize: isGold ? 1.0 : 0.5,
+      lotSize: defaultLot,
       reasons: confidences,
       countdownSeconds: 10,
     };
@@ -1551,10 +1638,10 @@ export function scanAiAutonomousPrediction(
     (sweptHigh || distToHigh <= totalRange * 0.35) &&
     (hasUnmitigatedBearishFvg || osc.rsi >= 52 || sweptHigh)
   ) {
-    const entry = Number(last.close.toFixed(2));
-    const sl = Number((Math.max(last.high, prev1.high) + atr * 0.75).toFixed(2));
-    const slDist = Math.max(0.1, sl - entry);
-    const tp = Number((entry - slDist * 3.0).toFixed(2));
+    const entry = Number(last.close.toFixed(dec));
+    const sl = Number((Math.max(last.high, prev1.high) + atr * 0.75).toFixed(dec));
+    const slDist = Math.max(meta.tickSize * 5, sl - entry);
+    const tp = Number((entry - slDist * 3.0).toFixed(dec));
 
     const confidences = [
       sweptHigh ? 'Buy-side liquidity sweep & bearish reclamation confirmed' : 'Price rejected at institutional premium ceiling',
@@ -1575,7 +1662,7 @@ export function scanAiAutonomousPrediction(
       stopLoss: sl,
       takeProfit: tp,
       rrRatio: 3.0,
-      lotSize: isGold ? 1.0 : 0.5,
+      lotSize: defaultLot,
       reasons: confidences,
       countdownSeconds: 10,
     };

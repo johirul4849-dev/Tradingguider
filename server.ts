@@ -3,12 +3,27 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import {
+  BRAND_CONFIG,
+  ALL_SUPPORTED_SYMBOLS,
+  getMarketSessionStatus,
+  MarketSymbolConfig,
+  SupportedSymbol,
+} from './src/config/brand';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json({ limit: '4mb' }));
+
+function resolveSymbolConfig(rawSymbol: string): MarketSymbolConfig {
+  const candidate = rawSymbol as SupportedSymbol;
+  if (ALL_SUPPORTED_SYMBOLS.includes(candidate)) {
+    return BRAND_CONFIG.markets[candidate];
+  }
+  return BRAND_CONFIG.markets['BTC/USD'];
+}
 
 function getAiClient() {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -26,8 +41,8 @@ function getAiClient() {
 }
 
 const SYSTEM_INSTRUCTION = `You are TradePilot AI, an institutional Smart Money Concepts (SMC) & Price Action Trading Mentor built into a professional backtesting terminal.
-Your job is to help traders master backtesting on BTC/USD and XAU/USD (Gold) by:
-1. Identifying exact Entry zones, Stop Loss invalidation levels, and Take Profit targets based on visible chart structure.
+Your job is to help traders master backtesting on Forex Major/Cross pairs (EUR/USD, GBP/USD, USD/JPY, etc.), XAU/USD (Gold), XAG/USD (Silver), and BTC/USD by:
+1. Identifying exact Entry zones, Stop Loss invalidation levels, and Take Profit targets based on visible chart structure and proper pair pip/decimal precision.
 2. Listing the exact technical confirmations (Liquidity Sweep, Break of Structure / BOS, Change of Character / CHoCH, Order Block / Supply-Demand Zone, EMA 20/50 alignment, VWAP, RSI/ATR confluence).
 3. Explaining clearly why a trade WON or LOST, what confirmations were present or missed, and marking the chart visually so the trader learns rapidly.`;
 
@@ -104,50 +119,205 @@ async function generateStructuredAiResponse(options: {
   };
 }
 
-// 1. Multi-Source Live Market Quote Engine (Real BTC/USD and Real XAU/USD Gold)
-async function fetchRealMarketQuote(symbol: string): Promise<{
+const quoteCache = new Map<
+  string,
+  {
+    timestamp: number;
+    data: { price: number; high24h: number; low24h: number; change24hPct: number; volume24h: number };
+  }
+>();
+
+async function fetchYahooQuote(
+  metaConfig: MarketSymbolConfig
+): Promise<{
+  price: number;
+  high24h: number;
+  low24h: number;
+  change24hPct: number;
+  volume24h: number;
+} | null> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3200);
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+      metaConfig.yahooSymbol
+    )}?interval=5m&range=1d`;
+    const r = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!r.ok) return null;
+
+    const d: any = await r.json();
+    const result = d?.chart?.result?.[0];
+    const yMeta = result?.meta;
+    const quotes = result?.indicators?.quote?.[0];
+    const closes: number[] = Array.isArray(quotes?.close)
+      ? quotes.close.filter((v: any) => typeof v === 'number' && isFinite(v) && v > 0)
+      : [];
+    const highs: number[] = Array.isArray(quotes?.high)
+      ? quotes.high.filter((v: any) => typeof v === 'number' && isFinite(v) && v > 0)
+      : [];
+    const lows: number[] = Array.isArray(quotes?.low)
+      ? quotes.low.filter((v: any) => typeof v === 'number' && isFinite(v) && v > 0)
+      : [];
+
+    const rawPrice = Number(yMeta?.regularMarketPrice || closes[closes.length - 1] || 0);
+    if (rawPrice <= 0) return null;
+
+    const decimals = metaConfig.decimals;
+    const price = Number(rawPrice.toFixed(decimals));
+    const prevClose = Number(yMeta?.chartPreviousClose || closes[0] || price);
+    const changePct = prevClose > 0 ? Number((((price - prevClose) / prevClose) * 100).toFixed(2)) : 0;
+    const rawHigh = Number(
+      yMeta?.regularMarketDayHigh || (highs.length ? Math.max(...highs) : price * 1.004)
+    );
+    const rawLow = Number(
+      yMeta?.regularMarketDayLow || (lows.length ? Math.min(...lows) : price * 0.996)
+    );
+
+    return {
+      price,
+      high24h: Number(Math.max(rawHigh, price).toFixed(decimals)),
+      low24h: Number(Math.min(rawLow, price).toFixed(decimals)),
+      change24hPct: changePct,
+      volume24h: Number(yMeta?.regularMarketVolume || 14500),
+    };
+  } catch (_e) {
+    return null;
+  }
+}
+
+async function fetchYahooCandles(
+  metaConfig: MarketSymbolConfig,
+  timeframe: string
+): Promise<Array<{ time: number; open: number; high: number; low: number; close: number; volume: number }>> {
+  const yahooTfMap: Record<string, { interval: string; range: string }> = {
+    '1m': { interval: '1m', range: '7d' },
+    '5m': { interval: '5m', range: '1mo' },
+    '15m': { interval: '15m', range: '1mo' },
+    '30m': { interval: '30m', range: '1mo' },
+    '1H': { interval: '1h', range: '3mo' },
+    '4H': { interval: '1h', range: '3mo' },
+    '1D': { interval: '1d', range: '1y' },
+  };
+  const cfg = yahooTfMap[timeframe] || yahooTfMap['15m'];
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5500);
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+      metaConfig.yahooSymbol
+    )}?interval=${cfg.interval}&range=${cfg.range}`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!res.ok) return [];
+
+    const json: any = await res.json();
+    const result = json?.chart?.result?.[0];
+    const timestamps: any[] = result?.timestamp || [];
+    const quote = result?.indicators?.quote?.[0];
+    if (!Array.isArray(timestamps) || !quote) return [];
+
+    const opens = quote.open || [];
+    const highs = quote.high || [];
+    const lows = quote.low || [];
+    const closes = quote.close || [];
+    const volumes = quote.volume || [];
+    const dec = metaConfig.decimals;
+
+    const rawBars: Array<{ time: number; open: number; high: number; low: number; close: number; volume: number }> = [];
+    for (let i = 0; i < timestamps.length; i++) {
+      const t = Number(timestamps[i]);
+      const o = Number(opens[i]);
+      const h = Number(highs[i]);
+      const l = Number(lows[i]);
+      const c = Number(closes[i]);
+      if (!isFinite(t) || !isFinite(o) || !isFinite(h) || !isFinite(l) || !isFinite(c) || o <= 0 || c <= 0) {
+        continue;
+      }
+      const rawVol = Number(volumes[i]);
+      const synthVol = Math.round(450 + (Math.abs(h - l) / Math.max(metaConfig.tickSize, 1e-6)) * 18);
+      rawBars.push({
+        time: Math.floor(t),
+        open: Number(o.toFixed(dec)),
+        high: Number(Math.max(o, h, c).toFixed(dec)),
+        low: Number(Math.min(o, l, c).toFixed(dec)),
+        close: Number(c.toFixed(dec)),
+        volume: isFinite(rawVol) && rawVol > 0 ? Math.round(rawVol) : synthVol,
+      });
+    }
+
+    rawBars.sort((a, b) => a.time - b.time);
+
+    // Deduplicate timestamps
+    const deduped: typeof rawBars = [];
+    for (const bar of rawBars) {
+      if (deduped.length > 0 && deduped[deduped.length - 1].time === bar.time) {
+        deduped[deduped.length - 1] = bar;
+      } else {
+        deduped.push(bar);
+      }
+    }
+
+    // Aggregate 1H bars into 4H buckets when timeframe === '4H'
+    if (timeframe === '4H') {
+      const buckets = new Map<number, (typeof deduped)[number]>();
+      for (const bar of deduped) {
+        const bucketTime = Math.floor(bar.time / 14400) * 14400;
+        const prev = buckets.get(bucketTime);
+        if (!prev) {
+          buckets.set(bucketTime, { ...bar, time: bucketTime });
+        } else {
+          prev.high = Number(Math.max(prev.high, bar.high).toFixed(dec));
+          prev.low = Number(Math.min(prev.low, bar.low).toFixed(dec));
+          prev.close = bar.close;
+          prev.volume += bar.volume;
+        }
+      }
+      return Array.from(buckets.values()).sort((a, b) => a.time - b.time);
+    }
+
+    return deduped;
+  } catch (_e) {
+    return [];
+  }
+}
+
+// 1. Multi-Source Live Market Quote Engine (All 25 Forex Pairs, Gold, Silver, BTC/USD)
+async function fetchRealMarketQuote(rawSymbol: string): Promise<{
   price: number;
   high24h: number;
   low24h: number;
   change24hPct: number;
   volume24h: number;
 }> {
-  if (symbol === 'XAU/USD') {
-    // 1. Try Yahoo Finance COMEX Gold (GC=F) - Exact Spot & Futures Benchmark
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 2200);
-      const r = await fetch(
-        'https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=15m&range=1d',
-        {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-          signal: controller.signal,
-        }
-      );
-      clearTimeout(timeout);
-      if (r.ok) {
-        const d: any = await r.json();
-        const meta = d?.chart?.result?.[0]?.meta;
-        if (meta && meta.regularMarketPrice > 0) {
-          const price = Number(meta.regularMarketPrice);
-          const prevClose = Number(meta.chartPreviousClose || price);
-          const changePct = Number((((price - prevClose) / prevClose) * 100).toFixed(2));
-          const high = Number(meta.regularMarketDayHigh || price * 1.008);
-          const low = Number(meta.regularMarketDayLow || price * 0.992);
-          return {
-            price,
-            high24h: high,
-            low24h: low,
-            change24hPct: changePct,
-            volume24h: Number(meta.regularMarketVolume || 18500),
-          };
-        }
-      }
-    } catch (_e) {
-      // try next
-    }
+  const metaConfig = resolveSymbolConfig(rawSymbol);
+  const symbol = metaConfig.id;
+  const cached = quoteCache.get(symbol);
+  if (cached && Date.now() - cached.timestamp < 1200) {
+    return cached.data;
+  }
 
-    // 2. Try Gold-API (instant spot gold feed)
+  const saveQuote = (data: {
+    price: number;
+    high24h: number;
+    low24h: number;
+    change24hPct: number;
+    volume24h: number;
+  }) => {
+    quoteCache.set(symbol, { timestamp: Date.now(), data });
+    return data;
+  };
+
+  if (symbol === 'XAU/USD') {
+    const yahooGold = await fetchYahooQuote(metaConfig);
+    if (yahooGold) return saveQuote(yahooGold);
+
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 1800);
@@ -157,122 +327,143 @@ async function fetchRealMarketQuote(symbol: string): Promise<{
         const d: any = await r.json();
         if (d && d.price > 0) {
           const price = Number(d.price.toFixed(2));
-          return {
+          return saveQuote({
             price,
             high24h: Number((price * 1.006).toFixed(2)),
             low24h: Number((price * 0.994).toFixed(2)),
             change24hPct: 0.35,
             volume24h: 12000,
-          };
+          });
         }
       }
-    } catch (_e) {
-      // try next
-    }
+    } catch (_e) {}
 
-    // 3. Fallback: Binance PAXGUSDT
     try {
-      const r = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT');
+      const r = await fetch('https://data-api.binance.vision/api/v3/ticker/24hr?symbol=PAXGUSDT');
       if (r.ok) {
         const d: any = await r.json();
         const price = parseFloat(d.lastPrice);
         if (price > 0) {
-          return {
-            price,
-            high24h: parseFloat(d.highPrice),
-            low24h: parseFloat(d.lowPrice),
+          return saveQuote({
+            price: Number(price.toFixed(2)),
+            high24h: Number(parseFloat(d.highPrice).toFixed(2)),
+            low24h: Number(parseFloat(d.lowPrice).toFixed(2)),
             change24hPct: parseFloat(d.priceChangePercent),
             volume24h: parseFloat(d.volume),
-          };
+          });
         }
       }
-    } catch (_e) {
-      // fallback
-    }
+    } catch (_e) {}
 
-    return {
-      price: 4178.4,
-      high24h: 4195.0,
-      low24h: 4162.0,
+    return saveQuote({
+      price: metaConfig.defaultPrice,
+      high24h: Number((metaConfig.defaultPrice * 1.004).toFixed(2)),
+      low24h: Number((metaConfig.defaultPrice * 0.996).toFixed(2)),
       change24hPct: 0.42,
       volume24h: 15400,
-    };
-  }
-
-  // BTC/USD: Binance BTCUSDT -> Coinbase -> Yahoo
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
-    const r = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT', {
-      signal: controller.signal,
     });
-    clearTimeout(timeout);
-    if (r.ok) {
-      const d: any = await r.json();
-      const price = parseFloat(d.lastPrice);
-      if (price > 0) {
-        return {
-          price,
-          high24h: parseFloat(d.highPrice),
-          low24h: parseFloat(d.lowPrice),
-          change24hPct: parseFloat(d.priceChangePercent),
-          volume24h: parseFloat(d.volume),
-        };
-      }
-    }
-  } catch (_e) {
-    // try Coinbase
   }
 
-  try {
-    const r = await fetch('https://api.coinbase.com/v2/prices/BTC-USD/spot');
-    if (r.ok) {
-      const d: any = await r.json();
-      const p = parseFloat(d?.data?.amount);
-      if (p > 0) {
-        return {
-          price: p,
-          high24h: p * 1.015,
-          low24h: p * 0.985,
-          change24hPct: 0.85,
-          volume24h: 24000,
-        };
-      }
+  if (symbol === 'BTC/USD') {
+    for (const url of [
+      'https://data-api.binance.vision/api/v3/ticker/24hr?symbol=BTCUSDT',
+      'https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT',
+    ]) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2000);
+        const r = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (r.ok) {
+          const d: any = await r.json();
+          const price = parseFloat(d.lastPrice);
+          if (price > 0) {
+            return saveQuote({
+              price: Number(price.toFixed(2)),
+              high24h: Number(parseFloat(d.highPrice).toFixed(2)),
+              low24h: Number(parseFloat(d.lowPrice).toFixed(2)),
+              change24hPct: parseFloat(d.priceChangePercent),
+              volume24h: parseFloat(d.volume),
+            });
+          }
+        }
+      } catch (_e) {}
     }
-  } catch (_e) {
-    // fallback
+
+    try {
+      const r = await fetch('https://api.coinbase.com/v2/prices/BTC-USD/spot');
+      if (r.ok) {
+        const d: any = await r.json();
+        const p = parseFloat(d?.data?.amount);
+        if (p > 0) {
+          return saveQuote({
+            price: Number(p.toFixed(2)),
+            high24h: Number((p * 1.015).toFixed(2)),
+            low24h: Number((p * 0.985).toFixed(2)),
+            change24hPct: 0.85,
+            volume24h: 24000,
+          });
+        }
+      }
+    } catch (_e) {}
+
+    const yahooBtc = await fetchYahooQuote(metaConfig);
+    if (yahooBtc) return saveQuote(yahooBtc);
+
+    return saveQuote({
+      price: metaConfig.defaultPrice,
+      high24h: Number((metaConfig.defaultPrice * 1.01).toFixed(2)),
+      low24h: Number((metaConfig.defaultPrice * 0.99).toFixed(2)),
+      change24hPct: 0.95,
+      volume24h: 32000,
+    });
   }
 
-  return {
-    price: 86050.0,
-    high24h: 86900.0,
-    low24h: 85200.0,
-    change24hPct: 0.95,
-    volume24h: 32000,
-  };
+  // All 25 Forex Pairs & Silver (XAG/USD) via Yahoo Finance
+  const yahooFx = await fetchYahooQuote(metaConfig);
+  if (yahooFx) return saveQuote(yahooFx);
+
+  return saveQuote({
+    price: metaConfig.defaultPrice,
+    high24h: Number((metaConfig.defaultPrice + metaConfig.defaultBracketDistance).toFixed(metaConfig.decimals)),
+    low24h: Number((metaConfig.defaultPrice - metaConfig.defaultBracketDistance).toFixed(metaConfig.decimals)),
+    change24hPct: 0.12,
+    volume24h: 12000,
+  });
 }
 
-// 1. 3-Month Historical + Live Running Candles Endpoint (BTC/USD & XAU/USD)
+// 3-Month Historical + Live Running Candles Cache
 const historyCache = new Map<string, { timestamp: number; payload: any }>();
 
-// Fast Real-Time Ticker Endpoint for Sub-Second Live Data Fallback
+// Fast Real-Time Ticker Endpoint for All Pairs
 app.get('/api/market/ticker', async (req, res) => {
-  const symbol = String(req.query.symbol || 'BTC/USD');
-  const quote = await fetchRealMarketQuote(symbol);
+  const metaConfig = resolveSymbolConfig(String(req.query.symbol || 'BTC/USD'));
+  const session = getMarketSessionStatus(metaConfig.id);
+  const quote = await fetchRealMarketQuote(metaConfig.id);
+  const halfSpread = metaConfig.typicalSpread / 2;
+
   return res.json({
-    symbol,
+    symbol: metaConfig.id,
     price: quote.price,
+    bid: Number((quote.price - halfSpread).toFixed(metaConfig.decimals)),
+    ask: Number((quote.price + halfSpread).toFixed(metaConfig.decimals)),
     high24h: quote.high24h,
     low24h: quote.low24h,
     change24hPct: quote.change24hPct,
     volume24h: quote.volume24h,
+    marketOpen: session.isOpen,
+    marketStatusLabel: session.statusLabel,
+    countdownText: session.countdownText,
+    nextTransitionAt: session.nextTransitionAt,
+    decimals: metaConfig.decimals,
     timestamp: Date.now(),
   });
 });
 
-// Real-Time Server-Sent Events (SSE) Stream for Guaranteed Real-Time Live Ticks
+// Real-Time Server-Sent Events (SSE) Stream with Market Hours Auto-Pause & Auto-Resume
 app.get('/api/market/stream', async (req, res) => {
-  const symbol = String(req.query.symbol || 'BTC/USD');
+  const metaConfig = resolveSymbolConfig(String(req.query.symbol || 'BTC/USD'));
+  const symbol = metaConfig.id;
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -280,14 +471,15 @@ app.get('/api/market/stream', async (req, res) => {
   res.flushHeaders?.();
 
   let isAlive = true;
+  const initialSession = getMarketSessionStatus(symbol);
   const initialQuote = await fetchRealMarketQuote(symbol);
   let lastKnownPrice = initialQuote.price;
   let lastHigh = initialQuote.high24h;
   let lastLow = initialQuote.low24h;
   let lastChange = initialQuote.change24hPct;
   let lastVol = initialQuote.volume24h;
+  let wasClosed = !initialSession.isOpen;
 
-  // Push immediate first tick
   const initialPayload = JSON.stringify({
     symbol,
     price: lastKnownPrice,
@@ -295,11 +487,14 @@ app.get('/api/market/stream', async (req, res) => {
     low24h: lastLow,
     change24hPct: lastChange,
     volume24h: lastVol,
+    marketOpen: initialSession.isOpen,
+    marketStatusLabel: initialSession.statusLabel,
+    countdownText: initialSession.countdownText,
+    nextTransitionAt: initialSession.nextTransitionAt,
     timestamp: Date.now(),
   });
   res.write(`data: ${initialPayload}\n\n`);
 
-  // Fast background loop updating real market quote every 1.5s with sub-second micro-ticks between
   let pollCounter = 0;
   const interval = setInterval(async () => {
     if (!isAlive) {
@@ -308,8 +503,39 @@ app.get('/api/market/stream', async (req, res) => {
     }
 
     pollCounter++;
-    // Every 3 ticks (1.2s), refresh quote from real market
-    if (pollCounter % 3 === 0) {
+    const session = getMarketSessionStatus(symbol);
+
+    // If Market is CLOSED (e.g. Forex Weekend Fri 22:00 UTC -> Sun 22:00 UTC):
+    // Freeze price cleanly with zero micro-ticks and send periodic session status heartbeat
+    if (!session.isOpen) {
+      wasClosed = true;
+      if (pollCounter % 5 !== 0) return; // Send frozen heartbeat every 2.0s
+
+      const frozenPayload = JSON.stringify({
+        symbol,
+        price: lastKnownPrice,
+        high24h: lastHigh,
+        low24h: lastLow,
+        change24hPct: lastChange,
+        volume24h: lastVol,
+        marketOpen: false,
+        marketStatusLabel: session.statusLabel,
+        countdownText: session.countdownText,
+        nextTransitionAt: session.nextTransitionAt,
+        timestamp: Date.now(),
+      });
+      try {
+        res.write(`data: ${frozenPayload}\n\n`);
+      } catch (_e) {
+        isAlive = false;
+        clearInterval(interval);
+      }
+      return;
+    }
+
+    // Auto-resume on Market Open transition OR periodic quote refresh every ~1.6s
+    if (wasClosed || pollCounter % 4 === 0) {
+      wasClosed = false;
       try {
         const q = await fetchRealMarketQuote(symbol);
         if (q.price > 0) {
@@ -320,21 +546,26 @@ app.get('/api/market/stream', async (req, res) => {
           lastVol = q.volume24h;
         }
       } catch (_e) {
-        // use lastKnownPrice
+        // retain lastKnownPrice
       }
     } else {
-      // Sub-second micro-tick fluctuation (+-0.005%)
-      const step = symbol === 'BTC/USD' ? (Math.random() - 0.5) * 3.5 : (Math.random() - 0.5) * 0.12;
-      lastKnownPrice = Number((lastKnownPrice + step).toFixed(2));
+      // Sub-second live micro-tick calibrated to symbol precision
+      const microAmplitude = Math.max(metaConfig.tickSize * 3, lastKnownPrice * 0.000035);
+      const step = (Math.random() - 0.5) * microAmplitude;
+      lastKnownPrice = Number((lastKnownPrice + step).toFixed(metaConfig.decimals));
     }
 
     const payload = JSON.stringify({
       symbol,
       price: lastKnownPrice,
-      high24h: Math.max(lastHigh, lastKnownPrice),
-      low24h: Math.min(lastLow, lastKnownPrice),
+      high24h: Number(Math.max(lastHigh, lastKnownPrice).toFixed(metaConfig.decimals)),
+      low24h: Number(Math.min(lastLow, lastKnownPrice).toFixed(metaConfig.decimals)),
       change24hPct: lastChange,
       volume24h: lastVol + pollCounter,
+      marketOpen: true,
+      marketStatusLabel: session.statusLabel,
+      countdownText: session.countdownText,
+      nextTransitionAt: session.nextTransitionAt,
       timestamp: Date.now(),
     });
 
@@ -353,15 +584,71 @@ app.get('/api/market/stream', async (req, res) => {
 });
 
 app.get('/api/market/history', async (req, res) => {
-  const symbol = String(req.query.symbol || 'BTC/USD');
-  const timeframe = String(req.query.timeframe || '1H');
+  const metaConfig = resolveSymbolConfig(String(req.query.symbol || 'BTC/USD'));
+  const symbol = metaConfig.id;
+  const timeframe = String(req.query.timeframe || '15m');
+  const session = getMarketSessionStatus(symbol);
   const cacheKey = `${symbol}_${timeframe}`;
 
   const cached = historyCache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < 10000) {
-    return res.json(cached.payload);
+  if (cached && Date.now() - cached.timestamp < 15000) {
+    return res.json({
+      ...cached.payload,
+      marketOpen: session.isOpen,
+      marketStatusLabel: session.statusLabel,
+      countdownText: session.countdownText,
+      nextTransitionAt: session.nextTransitionAt,
+    });
   }
 
+  // Route Forex Pairs, XAG/USD, and XAU/USD through Yahoo Finance authentic historical bars
+  if (symbol !== 'BTC/USD') {
+    const yahooCandles = await fetchYahooCandles(metaConfig, timeframe);
+    if (yahooCandles.length > 20) {
+      if (symbol === 'XAU/USD' && session.isOpen) {
+        try {
+          const gRes = await fetch('https://api.gold-api.com/price/XAU');
+          if (gRes.ok) {
+            const gData: any = await gRes.json();
+            if (gData && gData.price > 0) {
+              const lastBar = yahooCandles[yahooCandles.length - 1];
+              const liveGold = Number(gData.price.toFixed(2));
+              lastBar.close = liveGold;
+              lastBar.high = Math.max(lastBar.high, liveGold);
+              lastBar.low = Math.min(lastBar.low, liveGold);
+            }
+          }
+        } catch (_e) {}
+      }
+
+      const last = yahooCandles[yahooCandles.length - 1];
+      const prev24 = yahooCandles[Math.max(0, yahooCandles.length - 25)] || yahooCandles[0];
+      const changePct = prev24?.close
+        ? Number((((last.close - prev24.close) / prev24.close) * 100).toFixed(2))
+        : 0;
+
+      const payload = {
+        symbol,
+        timeframe,
+        price: last.close,
+        changePercent: changePct,
+        high24h: Math.max(...yahooCandles.slice(-24).map((c) => c.high)),
+        low24h: Math.min(...yahooCandles.slice(-24).map((c) => c.low)),
+        isLive: true,
+        marketOpen: session.isOpen,
+        marketStatusLabel: session.statusLabel,
+        countdownText: session.countdownText,
+        nextTransitionAt: session.nextTransitionAt,
+        decimals: metaConfig.decimals,
+        source: `YAHOO INSTITUTIONAL FX/METALS (${metaConfig.yahooSymbol})`,
+        candles: yahooCandles,
+      };
+      historyCache.set(cacheKey, { timestamp: Date.now(), payload });
+      return res.json(payload);
+    }
+  }
+
+  // BTC/USD (or Gold fallback): Binance Vision / Binance / Coinbase
   const intervalMap: Record<string, string> = {
     '1m': '1m',
     '5m': '5m',
@@ -371,70 +658,62 @@ app.get('/api/market/history', async (req, res) => {
     '4H': '4h',
     '1D': '1d',
   };
-  const binanceInterval = intervalMap[timeframe] || '1h';
+  const binanceInterval = intervalMap[timeframe] || '15m';
+  if (symbol === 'BTC/USD' || symbol === 'XAU/USD') {
+    const binancePair = symbol === 'XAU/USD' ? 'PAXGUSDT' : 'BTCUSDT';
+    const binanceUrls = [
+      `https://data-api.binance.vision/api/v3/klines?symbol=${binancePair}&interval=${binanceInterval}&limit=1000`,
+      `https://api.binance.com/api/v3/klines?symbol=${binancePair}&interval=${binanceInterval}&limit=1000`,
+    ];
 
-  // 1. Fetch Binance Vision or Binance standard candles for BTCUSDT or PAXGUSDT for Gold
-  const binancePair = symbol === 'XAU/USD' ? 'PAXGUSDT' : 'BTCUSDT';
-  const binanceUrls = [
-    `https://data-api.binance.vision/api/v3/klines?symbol=${binancePair}&interval=${binanceInterval}&limit=1000`,
-    `https://api.binance.com/api/v3/klines?symbol=${binancePair}&interval=${binanceInterval}&limit=1000`,
-  ];
+    for (const bUrl of binanceUrls) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 3500);
+        const bRes = await fetch(bUrl, { signal: controller.signal });
+        clearTimeout(timeout);
 
-  for (const bUrl of binanceUrls) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3500);
-      const bRes = await fetch(bUrl, { signal: controller.signal });
-      clearTimeout(timeout);
+        if (bRes.ok) {
+          const rawBatch: any[] = await bRes.json();
+          if (Array.isArray(rawBatch) && rawBatch.length > 20) {
+            const candles = rawBatch.map((k) => ({
+              time: Math.floor(Number(k[0]) / 1000),
+              open: Number(Number(k[1]).toFixed(2)),
+              high: Number(Number(k[2]).toFixed(2)),
+              low: Number(Number(k[3]).toFixed(2)),
+              close: Number(Number(k[4]).toFixed(2)),
+              volume: Number(k[5]),
+            }));
 
-      if (bRes.ok) {
-        const rawBatch: any[] = await bRes.json();
-        if (Array.isArray(rawBatch) && rawBatch.length > 20) {
-          const candles = rawBatch.map((k) => ({
-            time: Math.floor(Number(k[0]) / 1000),
-            open: Number(Number(k[1]).toFixed(2)),
-            high: Number(Number(k[2]).toFixed(2)),
-            low: Number(Number(k[3]).toFixed(2)),
-            close: Number(Number(k[4]).toFixed(2)),
-            volume: Number(k[5]),
-          }));
+            const last = candles[candles.length - 1];
+            const prev24 = candles[Math.max(0, candles.length - 25)] || candles[0];
+            const changePct = prev24?.close
+              ? Number((((last.close - prev24.close) / prev24.close) * 100).toFixed(2))
+              : 0;
 
-          // If Gold, sync last candle with live gold spot
-          if (symbol === 'XAU/USD') {
-            try {
-              const gRes = await fetch('https://api.gold-api.com/price/XAU');
-              if (gRes.ok) {
-                const gData = await gRes.json();
-                if (gData && gData.price > 0) {
-                  candles[candles.length - 1].close = gData.price;
-                }
-              }
-            } catch (_e) {}
+            const payload = {
+              symbol,
+              timeframe,
+              price: last.close,
+              changePercent: changePct,
+              high24h: Math.max(...candles.slice(-24).map((c) => c.high)),
+              low24h: Math.min(...candles.slice(-24).map((c) => c.low)),
+              isLive: true,
+              marketOpen: session.isOpen,
+              marketStatusLabel: session.statusLabel,
+              countdownText: session.countdownText,
+              nextTransitionAt: session.nextTransitionAt,
+              decimals: metaConfig.decimals,
+              source: symbol === 'XAU/USD' ? 'BINANCE VISION PHYSICAL GOLD (1:1 SPOT)' : 'BINANCE VISION BTC/USD',
+              candles,
+            };
+            historyCache.set(cacheKey, { timestamp: Date.now(), payload });
+            return res.json(payload);
           }
-
-          const last = candles[candles.length - 1];
-          const prev24 = candles[Math.max(0, candles.length - 25)] || candles[0];
-          const changePct = prev24?.close
-            ? Number((((last.close - prev24.close) / prev24.close) * 100).toFixed(2))
-            : 0;
-
-          const payload = {
-            symbol,
-            timeframe,
-            price: last.close,
-            changePercent: changePct,
-            high24h: Math.max(...candles.slice(-24).map((c) => c.high)),
-            low24h: Math.min(...candles.slice(-24).map((c) => c.low)),
-            isLive: true,
-            source: symbol === 'XAU/USD' ? 'BINANCE VISION PHYSICAL GOLD (1:1 SPOT)' : 'BINANCE VISION BTC/USD',
-            candles,
-          };
-          historyCache.set(cacheKey, { timestamp: Date.now(), payload });
-          return res.json(payload);
         }
+      } catch (_err) {
+        // try next endpoint
       }
-    } catch (_err) {
-      // try next endpoint
     }
   }
 
@@ -442,6 +721,11 @@ app.get('/api/market/history', async (req, res) => {
     symbol,
     timeframe,
     isLive: false,
+    marketOpen: session.isOpen,
+    marketStatusLabel: session.statusLabel,
+    countdownText: session.countdownText,
+    nextTransitionAt: session.nextTransitionAt,
+    decimals: metaConfig.decimals,
     source: '3M HISTORICAL ENGINE + RUNNING FEED',
     candles: [],
   });
@@ -467,15 +751,23 @@ app.post('/api/ai/auto-mark', async (req, res) => {
     };
     const targetLanguageName = langLabelMap[language] || 'Bengali (বাংলা script)';
 
+    const metaConfig = resolveSymbolConfig(String(instrument));
+    const decimals = metaConfig.decimals;
     const recent = Array.isArray(visibleCandles) ? visibleCandles.slice(-40) : [];
-    const last = recent[recent.length - 1] || { close: 84250, high: 84500, low: 83950, time: Math.floor(Date.now() / 1000) };
+    const last = recent[recent.length - 1] || {
+      close: metaConfig.defaultPrice,
+      high: metaConfig.defaultPrice + metaConfig.defaultBracketDistance,
+      low: metaConfig.defaultPrice - metaConfig.defaultBracketDistance,
+      time: Math.floor(Date.now() / 1000),
+    };
     const first = recent[0] || last;
     const highs = recent.map((c: any) => Number(c.high || c.close));
     const lows = recent.map((c: any) => Number(c.low || c.close));
     const swingHigh = highs.length ? Math.max(...highs) : last.high;
     const swingLow = lows.length ? Math.min(...lows) : last.low;
-    const atr = Number(indicators?.atr || (swingHigh - swingLow) * 0.08 || (instrument === 'BTC/USD' ? 180 : 3.2));
-    const decimals = 2;
+    const atr = Number(
+      indicators?.atr || (swingHigh - swingLow) * 0.08 || metaConfig.defaultBracketDistance * 0.45
+    );
 
     let lowIdx = 0;
     let highIdx = 0;
@@ -570,7 +862,7 @@ Calculate the exact high-probability setup on the visible chart:
                     `★ ${swingLow.toFixed(decimals)} লেভেলের নিচে সেল-সাইড লিকুইডিটি সুইপ সম্পন্ন হয়েছে`,
                     `⚡ EMA 20 এর উপরে শক্তিশালী বুলিশ BOS (Break of Structure) ক্যান্ডেল ক্লোজ দিয়েছে`,
                     `◆ আনমিটিগেটেড ডিমান্ড অর্ডার ব্লক (Order Block) জোনে প্রাইস সাপোর্ট নিয়েছে`,
-                    `✓ ATR(${atr.toFixed(2)}) অনুযায়ী নয়েজের বাইরে নিরাপদ স্টপ লস (${sl.toFixed(decimals)}) নির্ধারণ করা হয়েছে`,
+                    `✓ ATR(${atr.toFixed(decimals)}) অনুযায়ী নয়েজের বাইরে নিরাপদ স্টপ লস (${sl.toFixed(decimals)}) নির্ধারণ করা হয়েছে`,
                   ]
                 : [
                     `★ ${swingHigh.toFixed(decimals)} লেভেলের উপরে বাই-সাইড লিকুইডিটি সুইপ সম্পন্ন হয়েছে`,
@@ -608,7 +900,7 @@ Calculate the exact high-probability setup on the visible chart:
                     `★ ${swingLow.toFixed(decimals)} level er niche Liquidity Sweep complete hoyeche`,
                     `⚡ EMA 20 er upore strong Bullish BOS candle close diyeche`,
                     `◆ Demand Order Block zone a price retest koreche`,
-                    `✓ ATR(${atr.toFixed(2)}) onujayi safe Stop Loss (${sl.toFixed(decimals)}) set kora hoyeche`,
+                    `✓ ATR(${atr.toFixed(decimals)}) onujayi safe Stop Loss (${sl.toFixed(decimals)}) set kora hoyeche`,
                   ]
                 : [
                     `★ ${swingHigh.toFixed(decimals)} level a Buy-Side Liquidity Sweep hoyeche`,
@@ -642,7 +934,7 @@ Calculate the exact high-probability setup on the visible chart:
                   `★ Liquidity Sweep below ${swingLow.toFixed(decimals)} swing low`,
                   `⚡ Bullish BOS (Break of Structure) close above EMA 20`,
                   `◆ Unmitigated Bullish Order Block / Demand Zone retest`,
-                  `✓ ATR(${atr.toFixed(2)}) Stop Loss placed safely outside noise`,
+                  `✓ ATR(${atr.toFixed(decimals)}) Stop Loss placed safely outside noise`,
                 ]
               : [
                   `★ Buy-Side Liquidity Sweep at ${swingHigh.toFixed(decimals)}`,
@@ -776,7 +1068,8 @@ Candles During Trade (First 12): ${JSON.stringify((candlesDuringTrade || []).sli
         ],
       },
       fallbackGenerator: () => {
-        const decimals = 2;
+        const metaConfig = resolveSymbolConfig(String(trade?.instrument || 'BTC/USD'));
+        const decimals = metaConfig.decimals;
         const optEntry = isLong
           ? Number((swingLow + (swingHigh - swingLow) * 0.22).toFixed(decimals))
           : Number((swingHigh - (swingHigh - swingLow) * 0.22).toFixed(decimals));
@@ -806,7 +1099,7 @@ Candles During Trade (First 12): ${JSON.stringify((candlesDuringTrade || []).sli
             confirmationsMissed: isWin
               ? ['টার্গেটের কাছাকাছি ১.৫R প্রফিটে গেলে স্টপ লস ব্রেকইভেনে (BE) নিয়ে আসা আরও নিরাপদ']
               : [
-                  `${isLong ? swingLow.toFixed(2) : swingHigh.toFixed(2)} লেভেলে লিকুইডিটি সুইপ শেষ হওয়ার আগেই এন্ট্রি নেওয়া হয়েছে`,
+                  `${isLong ? swingLow.toFixed(decimals) : swingHigh.toFixed(decimals)} লেভেলে লিকুইডিটি সুইপ শেষ হওয়ার আগেই এন্ট্রি নেওয়া হয়েছে`,
                   'স্টপ লস সুইং উইকের বাইরে না রেখে ক্যান্ডেল ভোলাটিলিটির ভেতরে রাখা হয়েছিল',
                   'এন্ট্রি লেভেলে শক্তিশালী BOS বা ডিসপ্লেসমেন্ট ক্যান্ডেল ক্লোজের জন্য অপেক্ষা করা হয়নি',
                 ],
@@ -840,7 +1133,7 @@ Candles During Trade (First 12): ${JSON.stringify((candlesDuringTrade || []).sli
             confirmationsMissed: isWin
               ? ['1.5R profit a gele Stop Loss Breakeven (BE) a ana valo']
               : [
-                  `${isLong ? swingLow.toFixed(2) : swingHigh.toFixed(2)} level a Liquidity Sweep complete howar agei entry newa hoyeche`,
+                  `${isLong ? swingLow.toFixed(decimals) : swingHigh.toFixed(decimals)} level a Liquidity Sweep complete howar agei entry newa hoyeche`,
                   'Stop Loss swing candle wick er baire na rekhe khub kache rakha hoyechilo',
                   'Strong BOS confirmation candle close er jonno wait kora hoyni',
                 ],
@@ -874,7 +1167,7 @@ Candles During Trade (First 12): ${JSON.stringify((candlesDuringTrade || []).sli
           confirmationsMissed: isWin
             ? ['Monitor partial profit-taking near 1.5R if momentum stalls at opposing Order Block']
             : [
-                `Entered before liquidity sweep at ${isLong ? swingLow.toFixed(2) : swingHigh.toFixed(2)} completed`,
+                `Entered before liquidity sweep at ${isLong ? swingLow.toFixed(decimals) : swingHigh.toFixed(decimals)} completed`,
                 'Stop Loss was placed inside 1.2x ATR noise instead of beyond the structural swing wick',
                 'No closed displacement / BOS confirmation candle at the entry level',
               ],

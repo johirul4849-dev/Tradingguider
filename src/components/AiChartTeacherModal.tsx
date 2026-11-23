@@ -24,7 +24,7 @@ import {
   DeepBacktestReport,
   InspectedCandleSymptom,
 } from '../services/aiBacktestTeacherEngine';
-import { SupportedSymbol, SupportedTimeframe } from '../config/brand';
+import { BRAND_CONFIG, SupportedSymbol, SupportedTimeframe } from '../config/brand';
 
 interface AiChartTeacherModalProps {
   isOpen: boolean;
@@ -86,13 +86,13 @@ export const AiChartTeacherModal: React.FC<AiChartTeacherModalProps> = ({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/80 backdrop-blur-md animate-fadeIn">
       <div className="bg-[#131722] border border-[#2A2E39] w-full max-w-4xl rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
         {/* Top Header */}
-        <div className="px-5 py-4 border-b border-[#2A2E39] bg-[#1E222D] flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 to-emerald-500 flex items-center justify-center shadow-lg shadow-emerald-500/10">
+        <div className="shrink-0 px-5 py-4 border-b border-[#2A2E39] bg-[#1E222D] flex items-center justify-between">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 to-emerald-500 flex items-center justify-center shadow-lg shadow-emerald-500/10 shrink-0">
               <Sparkles className="w-5 h-5 text-black font-extrabold" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="text-base sm:text-lg font-bold text-white tracking-wide">
                   AI Chart Teacher & Deep Backtest Engine
                 </h2>
@@ -100,7 +100,7 @@ export const AiChartTeacherModal: React.FC<AiChartTeacherModalProps> = ({
                   {symbol} • {timeframe}
                 </span>
               </div>
-              <p className="text-xs text-[#787B86]">
+              <p className="text-xs text-[#787B86] truncate">
                 Master confirmation candles, symptoms, trend behavior & directional predictions directly on the chart.
               </p>
             </div>
@@ -108,14 +108,15 @@ export const AiChartTeacherModal: React.FC<AiChartTeacherModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg text-[#787B86] hover:text-white hover:bg-[#2A2E39] transition-colors"
+            aria-label="Close AI Chart Teacher modal"
+            className="p-1.5 rounded-lg text-[#787B86] hover:text-white hover:bg-[#2A2E39] transition-colors shrink-0 cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex items-center px-4 bg-[#181B24] border-b border-[#2A2E39] overflow-x-auto gap-2 py-2">
+        <div className="shrink-0 flex items-center px-4 bg-[#181B24] border-b border-[#2A2E39] overflow-x-auto gap-2 py-2">
           <button
             type="button"
             onClick={() => setActiveTab('CIRCLE_DETAIL')}
@@ -166,12 +167,12 @@ export const AiChartTeacherModal: React.FC<AiChartTeacherModalProps> = ({
             }`}
           >
             <BookOpen className="w-3.5 h-3.5" />
-            📘 {symbol === 'XAU/USD' ? 'Gold Mastery Playbook' : 'BTC 24/7 Playbook'}
+            📘 {BRAND_CONFIG.markets[symbol]?.shortName || symbol} Playbook
           </button>
         </div>
 
         {/* Modal Body */}
-        <div className="p-5 overflow-y-auto space-y-5 flex-1 custom-scrollbar">
+        <div className="p-5 overflow-y-auto overscroll-contain space-y-5 flex-1 min-h-0 custom-scrollbar">
           {/* TAB 1: CONFIRMATION CIRCLE DETAIL */}
           {activeTab === 'CIRCLE_DETAIL' && (
             <div className="space-y-5">
@@ -704,10 +705,10 @@ export const AiChartTeacherModal: React.FC<AiChartTeacherModalProps> = ({
         </div>
 
         {/* Modal Footer */}
-        <div className="px-5 py-3 border-t border-[#2A2E39] bg-[#1E222D] flex items-center justify-between">
+        <div className="shrink-0 px-5 py-3 border-t border-[#2A2E39] bg-[#1E222D] flex items-center justify-between">
           <div className="text-[11px] text-[#787B86] flex items-center gap-1.5">
             <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
-            AI Quantitative SMC Engine • Real Binance Historical Confluence
+            AI Quantitative SMC Engine • Institutional Market Historical Confluence
           </div>
 
           <button

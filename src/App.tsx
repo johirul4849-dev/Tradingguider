@@ -10,6 +10,7 @@ import {
   createSimulatedTradeInDb,
   updateSimulatedTradeInDb,
   logDisciplineEventInDb,
+  subscribeToUserSubscriptionInDb,
   collection,
   query,
   where,
@@ -23,7 +24,7 @@ import {
 import { LandingPage } from './components/LandingPage';
 import { TradingTerminalView } from './components/TradingTerminalView';
 import { SubscriptionModal } from './components/SubscriptionModal';
-import { subscriptionService, UserSubscriptionRecord } from './services/subscriptionService';
+import { subscriptionService, UserSubscriptionRecord, hasActiveAccess } from './services/subscriptionService';
 
 const INITIAL_DEMO_PROFILE: UserProfileData = {
   uid: 'demo_trader_01',
@@ -125,16 +126,16 @@ export default function App() {
           setIsAuthenticated(true);
           setIsDemoSandbox(false);
 
-          // Get or create 24-hour free trial / subscription record
-          const sub = subscriptionService.getOrCreateUserSubscription(
+          // Get or create 24-hour free trial / subscription record synced with Firestore
+          const sub = await subscriptionService.syncUserSubscriptionWithFirestore(
             user.uid,
             user.email || '',
             user.displayName || 'Trader'
           );
           setUserSubscription(sub);
 
-          // If trial has expired, prompt purchase package modal
-          if (sub.status === 'TRIAL_EXPIRED') {
+          // Strictly require active trial or admin-approved package to trade
+          if (!hasActiveAccess(sub)) {
             setShowSubscriptionModal(true);
           }
         } catch (err) {
@@ -170,8 +171,8 @@ export default function App() {
       const sub = subscriptionService.getUserSubscription(profile.uid);
       if (sub) {
         setUserSubscription({ ...sub });
-        // When 24h trial or package time ends, automatically prompt purchase package modal
-        if (sub.status === 'TRIAL_EXPIRED') {
+        // Strictly lock & open purchase modal whenever access is no longer active
+        if (!hasActiveAccess(sub)) {
           setShowSubscriptionModal(true);
         }
       }
@@ -204,8 +205,21 @@ export default function App() {
       }
     );
 
+    const unsubSub = subscribeToUserSubscriptionInDb(uid, (remoteSub) => {
+      if (remoteSub) {
+        const applied = subscriptionService.applyRemoteSubscription(remoteSub);
+        setUserSubscription({ ...applied });
+        if (!hasActiveAccess(applied)) {
+          setShowSubscriptionModal(true);
+        } else if (applied.status === 'ACTIVE_SUBSCRIBED') {
+          setShowSubscriptionModal(false);
+        }
+      }
+    });
+
     return () => {
       unsubTrades();
+      unsubSub();
     };
   }, [authReady, isAuthenticated]);
 
@@ -219,16 +233,16 @@ export default function App() {
       setIsAuthenticated(true);
       setIsDemoSandbox(false);
 
-      // Initialize or get 24-hour free trial / subscription record
-      const sub = subscriptionService.getOrCreateUserSubscription(
+      // Initialize or get 24-hour free trial / subscription record synced with Firestore
+      const sub = await subscriptionService.syncUserSubscriptionWithFirestore(
         user.uid,
         user.email || '',
         user.displayName || 'Google Trader'
       );
       setUserSubscription(sub);
 
-      // If user has no active subscription package and 24h trial expired, show package modal
-      if (sub.status === 'TRIAL_EXPIRED') {
+      // Strictly prompt purchase modal if user has no active package and 24h trial expired
+      if (!hasActiveAccess(sub)) {
         setShowSubscriptionModal(true);
       }
     } catch (err: any) {
@@ -236,9 +250,12 @@ export default function App() {
       if (err?.code === 'auth/popup-closed-by-user') {
         setAuthError('Sign-in cancelled. Please sign in with Google to access your 24-hour free trial.');
       } else {
-        // Fallback for iframe preview or blocked popups: create Google session with persistent local identity
-        // so the 24-hour trial and subscription tracking are strictly enforced!
-        const simulatedGoogleUid = `google_${Math.abs(Date.now() % 10000000)}`;
+        // Persistent local fallback UID so re-signing in after 24h expiry cannot reset the trial clock
+        let simulatedGoogleUid = localStorage.getItem('tp_fallback_google_uid');
+        if (!simulatedGoogleUid) {
+          simulatedGoogleUid = `google_${Math.abs(Date.now() % 10000000)}`;
+          localStorage.setItem('tp_fallback_google_uid', simulatedGoogleUid);
+        }
         const fallbackProf: UserProfileData = {
           ...INITIAL_DEMO_PROFILE,
           uid: simulatedGoogleUid,
@@ -255,7 +272,7 @@ export default function App() {
           'Google Trader'
         );
         setUserSubscription(sub);
-        if (sub.status === 'TRIAL_EXPIRED') {
+        if (!hasActiveAccess(sub)) {
           setShowSubscriptionModal(true);
         }
       }
@@ -359,7 +376,7 @@ export default function App() {
       <SubscriptionModal
         isOpen={showSubscriptionModal}
         onClose={() => {
-          if (userSubscription?.status !== 'TRIAL_EXPIRED') {
+          if (hasActiveAccess(userSubscription)) {
             setShowSubscriptionModal(false);
           }
         }}

@@ -23,6 +23,7 @@ import {
   Timestamp,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { SupportedSymbol } from '../config/brand';
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -93,7 +94,7 @@ export interface UserProfileData {
   displayName: string;
   email: string;
   photoURL: string;
-  preferredMarket: 'BTC/USD' | 'XAU/USD' | 'BOTH';
+  preferredMarket: SupportedSymbol | 'BOTH';
   preferredTimeframe: '1m' | '5m' | '15m' | '30m' | '1H' | '4H' | '1D';
   experienceLevel: 'Beginner' | 'Intermediate' | 'Advanced';
   mainGoal: string;
@@ -113,7 +114,7 @@ export interface UserProfileData {
 export interface SimulatedTradeRecord {
   id: string;
   userId: string;
-  instrument: 'BTC/USD' | 'XAU/USD';
+  instrument: SupportedSymbol;
   timeframe: string;
   mode: 'REPLAY' | 'TERMINAL' | 'LIVE';
   direction: 'LONG' | 'SHORT';
@@ -408,6 +409,193 @@ export async function saveTrainingProgressInDb(uid: string, progress: TrainingPr
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, path);
   }
+}
+
+export interface PaymentSubmissionDb {
+  packageId: 'MONTH_1' | 'MONTH_6' | 'MONTH_12';
+  amountPaid: number;
+  binanceTxId: string;
+  promoCodeUsed?: string;
+  submittedAt: number;
+  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  rejectionReason?: string;
+}
+
+export interface SubscriptionRecordDb {
+  uid: string;
+  email: string;
+  displayName: string;
+  firstLoginAt: number;
+  freeTrialExpiresAt: number;
+  status: 'TRIAL_ACTIVE' | 'TRIAL_EXPIRED' | 'PENDING_APPROVAL' | 'ACTIVE_SUBSCRIBED';
+  activePackageId?: 'MONTH_1' | 'MONTH_6' | 'MONTH_12';
+  subscriptionExpiresAt?: number;
+  lastPaymentSubmission?: PaymentSubmissionDb;
+  updatedAt?: any;
+}
+
+function sanitizePaymentSubmissionForDb(sub: PaymentSubmissionDb): PaymentSubmissionDb {
+  const clean: PaymentSubmissionDb = {
+    packageId: sub.packageId,
+    amountPaid: Number(sub.amountPaid),
+    binanceTxId: safeStr(sub.binanceTxId, 128),
+    submittedAt: Number(sub.submittedAt),
+    status: sub.status,
+  };
+  if (sub.promoCodeUsed) {
+    clean.promoCodeUsed = safeStr(sub.promoCodeUsed, 40);
+  }
+  if (sub.rejectionReason) {
+    clean.rejectionReason = safeStr(sub.rejectionReason, 300);
+  }
+  return clean;
+}
+
+export async function syncOrCreateSubscriptionInDb(
+  uid: string,
+  email: string,
+  displayName: string
+): Promise<SubscriptionRecordDb> {
+  const path = `subscriptions/${uid}`;
+  const ref = doc(db, 'subscriptions', uid);
+  try {
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
+      const existing = snap.data() as SubscriptionRecordDb;
+      const cleanName = safeStr(displayName, 120, existing.displayName || 'Trader');
+      const cleanEmail = safeStr(email, 254, existing.email || 'trader@example.com');
+      if (cleanName !== existing.displayName || cleanEmail !== existing.email) {
+        try {
+          await updateDoc(ref, {
+            displayName: cleanName,
+            email: cleanEmail,
+            updatedAt: serverTimestamp(),
+          });
+        } catch {
+          // Non-fatal metadata update
+        }
+      }
+      return {
+        ...existing,
+        displayName: cleanName,
+        email: cleanEmail,
+      };
+    }
+
+    const now = Date.now();
+    const initialSub: SubscriptionRecordDb = {
+      uid: safeStr(uid, 128),
+      email: safeStr(email, 254, 'trader@example.com'),
+      displayName: safeStr(displayName, 120, 'Trader'),
+      firstLoginAt: now,
+      freeTrialExpiresAt: now + 24 * 60 * 60 * 1000,
+      status: 'TRIAL_ACTIVE',
+      updatedAt: serverTimestamp(),
+    };
+    await setDoc(ref, initialSub);
+    return initialSub;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+}
+
+export async function submitPaymentToDb(
+  uid: string,
+  submission: PaymentSubmissionDb
+): Promise<void> {
+  const path = `subscriptions/${uid}`;
+  const ref = doc(db, 'subscriptions', uid);
+  try {
+    await updateDoc(ref, {
+      status: 'PENDING_APPROVAL',
+      lastPaymentSubmission: sanitizePaymentSubmissionForDb(submission),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, path);
+  }
+}
+
+export async function markSubscriptionExpiredInDb(uid: string): Promise<void> {
+  const path = `subscriptions/${uid}`;
+  const ref = doc(db, 'subscriptions', uid);
+  try {
+    await updateDoc(ref, {
+      status: 'TRIAL_EXPIRED',
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, path);
+  }
+}
+
+export async function adminUpdateSubscriptionInDb(record: SubscriptionRecordDb): Promise<void> {
+  const path = `subscriptions/${record.uid}`;
+  const ref = doc(db, 'subscriptions', record.uid);
+  try {
+    const payload: Record<string, any> = {
+      uid: safeStr(record.uid, 128),
+      email: safeStr(record.email, 254, 'trader@example.com'),
+      displayName: safeStr(record.displayName, 120, 'Trader'),
+      firstLoginAt: Number(record.firstLoginAt),
+      freeTrialExpiresAt: Number(record.freeTrialExpiresAt),
+      status: record.status,
+      updatedAt: serverTimestamp(),
+    };
+    if (record.activePackageId) {
+      payload.activePackageId = record.activePackageId;
+    }
+    if (record.subscriptionExpiresAt !== undefined) {
+      payload.subscriptionExpiresAt = Number(record.subscriptionExpiresAt);
+    }
+    if (record.lastPaymentSubmission) {
+      payload.lastPaymentSubmission = sanitizePaymentSubmissionForDb(record.lastPaymentSubmission);
+    }
+    await setDoc(ref, payload);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+}
+
+export function subscribeToUserSubscriptionInDb(
+  uid: string,
+  onData: (record: SubscriptionRecordDb | null) => void
+): () => void {
+  const path = `subscriptions/${uid}`;
+  const ref = doc(db, 'subscriptions', uid);
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (snap.exists()) {
+        onData(snap.data() as SubscriptionRecordDb);
+      } else {
+        onData(null);
+      }
+    },
+    (err) => {
+      handleFirestoreError(err, OperationType.GET, path);
+    }
+  );
+}
+
+export function subscribeToAllSubscriptionsAsAdminInDb(
+  onData: (records: SubscriptionRecordDb[]) => void
+): () => void {
+  const path = 'subscriptions';
+  const ref = collection(db, 'subscriptions');
+  return onSnapshot(
+    ref,
+    (snap) => {
+      const list: SubscriptionRecordDb[] = [];
+      snap.forEach((docSnap) => {
+        list.push(docSnap.data() as SubscriptionRecordDb);
+      });
+      onData(list);
+    },
+    (err) => {
+      handleFirestoreError(err, OperationType.LIST, path);
+    }
+  );
 }
 
 export { onAuthStateChanged, collection, query, where, onSnapshot, doc, Timestamp, deleteDoc };

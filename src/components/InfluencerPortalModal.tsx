@@ -137,50 +137,57 @@ export const InfluencerPortalModal: React.FC<InfluencerPortalModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4 overflow-y-auto">
-      <div className="relative w-full max-w-2xl bg-[#131722] border border-[#2A2E39] rounded-2xl shadow-2xl p-6 sm:p-8 text-[#D1D4DC]">
-        <button
-          onClick={onClose}
-          className="absolute top-5 right-5 text-[#94A3B8] hover:text-white transition-colors"
-        >
-          <X className="w-5 h-5" />
-        </button>
-
-        {/* Top Switcher Tabs */}
-        <div className="flex items-center gap-2 mb-6 border-b border-[#2A2E39] pb-3">
-          <button
-            onClick={() => setMode('APPLY')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-              mode === 'APPLY' || mode === 'CREDENTIALS_POPUP'
-                ? 'bg-[#2962FF] text-white shadow-md'
-                : 'text-[#94A3B8] hover:text-white'
-            }`}
-          >
-            Join as Partner
-          </button>
-          <button
-            onClick={() => setMode('LOGIN')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-              mode === 'LOGIN'
-                ? 'bg-[#2962FF] text-white shadow-md'
-                : 'text-[#94A3B8] hover:text-white'
-            }`}
-          >
-            Influencer Login
-          </button>
-          {activeInfluencer && (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-3 sm:p-5">
+      <div className="w-full max-w-2xl max-h-[90vh] sm:max-h-[92vh] bg-[#131722] border border-[#2A2E39] rounded-2xl shadow-2xl text-[#D1D4DC] flex flex-col overflow-hidden">
+        {/* Pinned Top Bar with Switcher Tabs & Close X */}
+        <div className="shrink-0 px-5 py-3.5 border-b border-[#2A2E39] bg-[#181C27] flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 flex-wrap">
             <button
-              onClick={() => setMode('DASHBOARD')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                mode === 'DASHBOARD'
-                  ? 'bg-[#00E676] text-black shadow-md'
-                  : 'text-[#00E676] hover:underline'
+              onClick={() => setMode('APPLY')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                mode === 'APPLY' || mode === 'CREDENTIALS_POPUP'
+                  ? 'bg-[#2962FF] text-white shadow-md'
+                  : 'text-[#94A3B8] hover:text-white'
               }`}
             >
-              My Dashboard ({activeInfluencer.couponCode})
+              Join as Partner
             </button>
-          )}
+            <button
+              onClick={() => setMode('LOGIN')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                mode === 'LOGIN'
+                  ? 'bg-[#2962FF] text-white shadow-md'
+                  : 'text-[#94A3B8] hover:text-white'
+              }`}
+            >
+              Influencer Login
+            </button>
+            {activeInfluencer && (
+              <button
+                onClick={() => setMode('DASHBOARD')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  mode === 'DASHBOARD'
+                    ? 'bg-[#00E676] text-black shadow-md'
+                    : 'text-[#00E676] hover:underline'
+                }`}
+              >
+                My Dashboard ({activeInfluencer.couponCode})
+              </button>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close influencer portal"
+            className="w-8 h-8 rounded-lg bg-[#2A2E39]/70 hover:bg-[#363A45] text-[#94A3B8] hover:text-white flex items-center justify-center transition-colors shrink-0 cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
+
+        {/* Scrollable Content Body */}
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-5 sm:p-6">
 
         {/* MODE: APPLY / REGISTRATION */}
         {mode === 'APPLY' && (
@@ -533,6 +540,7 @@ export const InfluencerPortalModal: React.FC<InfluencerPortalModalProps> = ({
             </div>
           </div>
         )}
+        </div>
       </div>
     </div>
   );

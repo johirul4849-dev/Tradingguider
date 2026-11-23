@@ -1,4 +1,10 @@
-import { SupportedSymbol, SupportedTimeframe } from '../config/brand';
+import {
+  ALL_SUPPORTED_SYMBOLS,
+  BRAND_CONFIG,
+  getMarketSessionStatus,
+  SupportedSymbol,
+  SupportedTimeframe,
+} from '../config/brand';
 import { CandleData, TIMEFRAME_SECONDS } from './marketEngine';
 
 export interface LiveMarketTick {
@@ -11,6 +17,7 @@ export interface LiveMarketTick {
   change24hPct: number;
   volume24h: number;
   candle: CandleData;
+  marketOpen: boolean;
   timestamp: number;
 }
 
@@ -18,6 +25,40 @@ export type LiveStreamStatus = 'CONNECTED' | 'CONNECTING' | 'RECONNECTING' | 'OF
 
 type TickListener = (tick: LiveMarketTick) => void;
 type StatusListener = (status: LiveStreamStatus) => void;
+
+function buildInitialTicks(): Record<SupportedSymbol, LiveMarketTick> {
+  const nowMs = Date.now();
+  const nowSec = Math.floor(nowMs / 1000);
+  const ticks = {} as Record<SupportedSymbol, LiveMarketTick>;
+
+  ALL_SUPPORTED_SYMBOLS.forEach((sym) => {
+    const meta = BRAND_CONFIG.markets[sym];
+    const halfSpread = meta.typicalSpread / 2;
+    const session = getMarketSessionStatus(sym, nowMs);
+    ticks[sym] = {
+      symbol: sym,
+      price: meta.defaultPrice,
+      bid: Number((meta.defaultPrice - halfSpread).toFixed(meta.decimals)),
+      ask: Number((meta.defaultPrice + halfSpread).toFixed(meta.decimals)),
+      high24h: Number((meta.defaultPrice + meta.defaultBracketDistance).toFixed(meta.decimals)),
+      low24h: Number((meta.defaultPrice - meta.defaultBracketDistance).toFixed(meta.decimals)),
+      change24hPct: 0,
+      volume24h: 14000,
+      candle: {
+        time: nowSec,
+        open: meta.defaultPrice,
+        high: Number((meta.defaultPrice + meta.tickSize * 5).toFixed(meta.decimals)),
+        low: Number((meta.defaultPrice - meta.tickSize * 5).toFixed(meta.decimals)),
+        close: meta.defaultPrice,
+        volume: 45,
+      },
+      marketOpen: session.isOpen,
+      timestamp: nowMs,
+    };
+  });
+
+  return ticks;
+}
 
 class LiveMarketStreamerService {
   private ws: WebSocket | null = null;
@@ -27,57 +68,21 @@ class LiveMarketStreamerService {
   private tickListeners: Set<TickListener> = new Set();
   private statusListeners: Set<StatusListener> = new Set();
   private status: LiveStreamStatus = 'CONNECTING';
-  private reconnectAttempts = 0;
   private reconnectTimer: any = null;
   private fallbackPollTimer: any = null;
+  private sessionWatchTimer: any = null;
   private lastTickTime = 0;
+  private lastObservedMarketOpen = true;
 
-  // Cached latest ticks for instant access (realistic starting prices)
-  private latestTicks: Record<SupportedSymbol, LiveMarketTick> = {
-    'BTC/USD': {
-      symbol: 'BTC/USD',
-      price: 86050.0,
-      bid: 86046.5,
-      ask: 86053.5,
-      high24h: 86900.0,
-      low24h: 85200.0,
-      change24hPct: 0.95,
-      volume24h: 38400,
-      candle: {
-        time: Math.floor(Date.now() / 1000),
-        open: 86010.0,
-        high: 86080.0,
-        low: 85990.0,
-        close: 86050.0,
-        volume: 45,
-      },
-      timestamp: Date.now(),
-    },
-    'XAU/USD': {
-      symbol: 'XAU/USD',
-      price: 4178.4,
-      bid: 4178.15,
-      ask: 4178.65,
-      high24h: 4195.0,
-      low24h: 4162.0,
-      change24hPct: 0.45,
-      volume24h: 18200,
-      candle: {
-        time: Math.floor(Date.now() / 1000),
-        open: 4176.5,
-        high: 4180.2,
-        low: 4175.8,
-        close: 4178.4,
-        volume: 85,
-      },
-      timestamp: Date.now(),
-    },
-  };
+  // Cached latest ticks for all 28 supported symbols
+  private latestTicks: Record<SupportedSymbol, LiveMarketTick> = buildInitialTicks();
 
   constructor() {
+    this.lastObservedMarketOpen = getMarketSessionStatus(this.currentSymbol).isOpen;
     this.fetchInstantTicker(this.currentSymbol);
     this.connect();
     this.startFallbackPolling();
+    this.startSessionWatcher();
   }
 
   public subscribeTicks(listener: TickListener) {
@@ -110,18 +115,24 @@ class LiveMarketStreamerService {
   }
 
   public getLatestTick(sym: SupportedSymbol): LiveMarketTick {
-    return this.latestTicks[sym];
+    return this.latestTicks[sym] || buildInitialTicks()[sym];
   }
 
   public setSymbolAndTimeframe(symbol: SupportedSymbol, timeframe: SupportedTimeframe) {
     const symbolChanged = this.currentSymbol !== symbol;
     this.currentSymbol = symbol;
     this.currentTimeframe = timeframe;
+    this.lastObservedMarketOpen = getMarketSessionStatus(symbol).isOpen;
 
     // Immediately push cached tick so UI never flickers
     const tick = this.latestTicks[symbol];
     if (tick) {
-      this.tickListeners.forEach((fn) => fn(tick));
+      this.tickListeners.forEach((fn) =>
+        fn({
+          ...tick,
+          marketOpen: this.lastObservedMarketOpen,
+        })
+      );
     }
 
     this.fetchInstantTicker(symbol);
@@ -131,63 +142,79 @@ class LiveMarketStreamerService {
     }
   }
 
-  private async fetchInstantTicker(sym: SupportedSymbol) {
-    const isGold = sym === 'XAU/USD';
-    const binanceSymbol = isGold ? 'PAXGUSDT' : 'BTCUSDT';
+  private startSessionWatcher() {
+    if (this.sessionWatchTimer) clearInterval(this.sessionWatchTimer);
+    this.sessionWatchTimer = setInterval(() => {
+      const sym = this.currentSymbol;
+      const isOpen = getMarketSessionStatus(sym).isOpen;
+      if (isOpen !== this.lastObservedMarketOpen) {
+        this.lastObservedMarketOpen = isOpen;
+        const current = this.latestTicks[sym];
+        if (current) {
+          const updated: LiveMarketTick = {
+            ...current,
+            marketOpen: isOpen,
+            timestamp: Date.now(),
+          };
+          this.latestTicks[sym] = updated;
+          this.tickListeners.forEach((fn) => fn(updated));
+        }
 
-    // 1. Direct browser CORS fetch to Binance Vision (Zero API key needed, <100ms, 100% works on Vercel)
-    try {
-      const bRes = await fetch(
-        `https://data-api.binance.vision/api/v3/ticker/24hr?symbol=${binanceSymbol}`
-      );
-      if (bRes.ok) {
-        const pd = await bRes.json();
-        const p = parseFloat(pd.lastPrice);
-        if (p > 0) {
-          this.applyTickUpdate(
-            sym,
-            p,
-            parseFloat(pd.highPrice),
-            parseFloat(pd.lowPrice),
-            parseFloat(pd.priceChangePercent),
-            parseFloat(pd.volume)
-          );
-          this.setStatus('CONNECTED');
-          return;
+        if (isOpen) {
+          // Forex / Metals just opened! Automatically resume live feeds without page reload
+          this.fetchInstantTicker(sym);
+          this.connect();
         }
       }
-    } catch (_e) {}
+    }, 1000);
+  }
 
-    // 2. Direct browser fetch to Gold-API if Gold, or Coinbase if BTC
-    try {
-      if (isGold) {
-        const gr = await fetch('https://api.gold-api.com/price/XAU');
-        if (gr.ok) {
-          const gd = await gr.json();
-          if (gd && gd.price > 0) {
-            this.applyTickUpdate('XAU/USD', gd.price, gd.price * 1.015, gd.price * 0.985, 0.45, 18500);
+  private async fetchInstantTicker(sym: SupportedSymbol) {
+    const session = getMarketSessionStatus(sym);
+
+    // 1. Direct ultra-fast Binance Vision / Coinbase for Crypto (BTC/USD)
+    if (sym === 'BTC/USD') {
+      try {
+        const bRes = await fetch(
+          `https://data-api.binance.vision/api/v3/ticker/24hr?symbol=BTCUSDT`
+        );
+        if (bRes.ok) {
+          const pd = await bRes.json();
+          const p = parseFloat(pd.lastPrice);
+          if (p > 0) {
+            this.applyTickUpdate(
+              sym,
+              p,
+              parseFloat(pd.highPrice),
+              parseFloat(pd.lowPrice),
+              parseFloat(pd.priceChangePercent),
+              parseFloat(pd.volume),
+              true
+            );
             this.setStatus('CONNECTED');
             return;
           }
         }
-      } else {
+      } catch (_e) {}
+
+      try {
         const cr = await fetch('https://api.coinbase.com/v2/prices/BTC-USD/spot');
         if (cr.ok) {
           const cd = await cr.json();
           const p = parseFloat(cd?.data?.amount);
           if (p > 0) {
-            this.applyTickUpdate('BTC/USD', p, p * 1.02, p * 0.98, 1.1, 42000);
+            this.applyTickUpdate('BTC/USD', p, p * 1.02, p * 0.98, 1.1, 42000, true);
             this.setStatus('CONNECTED');
             return;
           }
         }
-      }
-    } catch (_e) {}
+      } catch (_e) {}
+    }
 
-    // 3. Try local server endpoint if running (Google Studio dev server)
+    // 2. For all Forex pairs, Silver (XAG/USD), and Gold (XAU/USD): query backend Yahoo/Multi-source ticker
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 800);
+      const timeoutId = setTimeout(() => controller.abort(), 2500);
       const r = await fetch(`/api/market/ticker?symbol=${encodeURIComponent(sym)}`, {
         signal: controller.signal,
       });
@@ -195,22 +222,56 @@ class LiveMarketStreamerService {
       if (r.ok) {
         const d = await r.json();
         if (d && d.price > 0) {
-          this.applyTickUpdate(sym, d.price, d.high24h, d.low24h, d.change24hPct, d.volume24h);
+          this.applyTickUpdate(
+            sym,
+            d.price,
+            d.high24h,
+            d.low24h,
+            d.change24hPct,
+            d.volume24h,
+            d.marketOpen ?? session.isOpen
+          );
           this.setStatus('CONNECTED');
+          return;
         }
       }
     } catch (_e) {}
+
+    // 3. Direct Gold fallback if backend unreachable
+    if (sym === 'XAU/USD') {
+      try {
+        const gr = await fetch('https://api.gold-api.com/price/XAU');
+        if (gr.ok) {
+          const gd = await gr.json();
+          if (gd && gd.price > 0) {
+            this.applyTickUpdate(
+              'XAU/USD',
+              gd.price,
+              gd.price * 1.015,
+              gd.price * 0.985,
+              0.45,
+              18500,
+              session.isOpen
+            );
+            this.setStatus('CONNECTED');
+            return;
+          }
+        }
+      } catch (_e) {}
+    }
   }
 
   private startFallbackPolling() {
     if (this.fallbackPollTimer) clearInterval(this.fallbackPollTimer);
     this.fallbackPollTimer = setInterval(async () => {
+      const sym = this.currentSymbol;
+      if (!getMarketSessionStatus(sym).isOpen) return;
+
       const now = Date.now();
-      // If no tick received within 2s, poll via server
-      if (now - this.lastTickTime > 1800) {
-        this.fetchInstantTicker(this.currentSymbol);
+      if (now - this.lastTickTime > 2000) {
+        this.fetchInstantTicker(sym);
       }
-    }, 1200);
+    }, 1500);
   }
 
   public connect() {
@@ -218,9 +279,10 @@ class LiveMarketStreamerService {
     this.setStatus('CONNECTING');
 
     const sym = this.currentSymbol;
-    const binancePair = sym === 'XAU/USD' ? 'paxgusdt' : 'btcusdt';
+    const isCrypto = sym === 'BTC/USD';
+    const isGold = sym === 'XAU/USD';
 
-    // 1. Setup Server-Sent Events (SSE) stream (guaranteed reliable through all firewalls/sandboxes)
+    // 1. Server-Sent Events (SSE) stream supports all 28 pairs & enforces market open/close freeze/resume
     try {
       if (typeof window !== 'undefined' && 'EventSource' in window) {
         const sse = new EventSource(`/api/market/stream?symbol=${encodeURIComponent(sym)}`);
@@ -228,7 +290,6 @@ class LiveMarketStreamerService {
 
         sse.onopen = () => {
           this.setStatus('CONNECTED');
-          this.reconnectAttempts = 0;
         };
 
         sse.onmessage = (event) => {
@@ -236,12 +297,13 @@ class LiveMarketStreamerService {
             const data = JSON.parse(event.data);
             if (data && data.price > 0) {
               this.applyTickUpdate(
-                data.symbol || sym,
+                (data.symbol as SupportedSymbol) || sym,
                 data.price,
                 data.high24h,
                 data.low24h,
                 data.change24hPct,
-                data.volume24h
+                data.volume24h,
+                data.marketOpen
               );
               this.setStatus('CONNECTED');
             }
@@ -251,55 +313,48 @@ class LiveMarketStreamerService {
         };
 
         sse.onerror = () => {
-          // SSE will auto-retry, but fallback polling keeps ticks flowing
+          // SSE auto-retries and fallback polling keeps quotes fresh
         };
       }
-    } catch (_err) {
-      // fallback
-    }
+    } catch (_err) {}
 
-    // 2. Try direct Binance WebSocket as parallel ultra-fast feed
-    try {
-      const wsUrl = `wss://stream.binance.com:9443/ws/${binancePair}@ticker`;
-      const socket = new WebSocket(wsUrl);
-      this.ws = socket;
+    // 2. Direct Binance WebSocket ONLY for 24/7 BTC/USD (or XAU/USD when Forex market is open)
+    if (isCrypto || (isGold && getMarketSessionStatus(sym).isOpen)) {
+      const binancePair = isGold ? 'paxgusdt' : 'btcusdt';
+      try {
+        const wsUrl = `wss://stream.binance.com:9443/ws/${binancePair}@ticker`;
+        const socket = new WebSocket(wsUrl);
+        this.ws = socket;
 
-      socket.onopen = () => {
-        this.setStatus('CONNECTED');
-      };
+        socket.onopen = () => {
+          this.setStatus('CONNECTED');
+        };
 
-      socket.onmessage = (event) => {
-        try {
-          const raw = JSON.parse(event.data);
-          const data = raw.data || raw;
-          if (data.e === '24hrTicker' || data.c) {
-            const price = parseFloat(data.c) || 0;
-            if (price > 0) {
-              this.applyTickUpdate(
-                sym,
-                price,
-                parseFloat(data.h),
-                parseFloat(data.l),
-                parseFloat(data.P),
-                parseFloat(data.v)
-              );
-              this.setStatus('CONNECTED');
+        socket.onmessage = (event) => {
+          try {
+            const raw = JSON.parse(event.data);
+            const data = raw.data || raw;
+            if (data.e === '24hrTicker' || data.c) {
+              const price = parseFloat(data.c) || 0;
+              if (price > 0 && getMarketSessionStatus(sym).isOpen) {
+                this.applyTickUpdate(
+                  sym,
+                  price,
+                  parseFloat(data.h),
+                  parseFloat(data.l),
+                  parseFloat(data.P),
+                  parseFloat(data.v),
+                  true
+                );
+                this.setStatus('CONNECTED');
+              }
             }
-          }
-        } catch (_e) {
-          // ignore
-        }
-      };
+          } catch (_e) {}
+        };
 
-      socket.onerror = () => {
-        // SSE covers it
-      };
-
-      socket.onclose = () => {
-        // SSE covers it
-      };
-    } catch (_err) {
-      // SSE covers it
+        socket.onerror = () => {};
+        socket.onclose = () => {};
+      } catch (_err) {}
     }
   }
 
@@ -309,48 +364,60 @@ class LiveMarketStreamerService {
     high24?: number,
     low24?: number,
     changePct?: number,
-    vol24?: number
+    vol24?: number,
+    marketOpenOverride?: boolean
   ) {
     if (price <= 0) return;
     this.lastTickTime = Date.now();
-    const spread = sym === 'BTC/USD' ? 3.5 : 0.18;
+    const meta = BRAND_CONFIG.markets[sym] || BRAND_CONFIG.markets['BTC/USD'];
+    const dec = meta.decimals;
+    const halfSpread = meta.typicalSpread / 2;
+    const roundedPrice = Number(price.toFixed(dec));
     const existing = this.latestTicks[sym];
+    const isMarketOpen = marketOpenOverride ?? getMarketSessionStatus(sym).isOpen;
 
     const stepSec = TIMEFRAME_SECONDS[this.currentTimeframe] || 900;
     const nowSec = Math.floor(Date.now() / 1000);
     const candlePeriodTime = Math.floor(nowSec / stepSec) * stepSec;
 
     let candle: CandleData;
-    if (existing?.candle && existing.candle.time === candlePeriodTime) {
+    if (!isMarketOpen && existing?.candle) {
+      // Frozen session: preserve exact close candle without creating phantom weekend bars
       candle = {
         ...existing.candle,
-        close: price,
-        high: Math.max(existing.candle.high, price),
-        low: Math.min(existing.candle.low, price),
+        close: roundedPrice,
+      };
+    } else if (existing?.candle && existing.candle.time === candlePeriodTime) {
+      candle = {
+        ...existing.candle,
+        close: roundedPrice,
+        high: Number(Math.max(existing.candle.high, roundedPrice).toFixed(dec)),
+        low: Number(Math.min(existing.candle.low, roundedPrice).toFixed(dec)),
         volume: existing.candle.volume + 1,
       };
     } else {
-      const prevClose = existing?.candle ? existing.candle.close : price;
+      const prevClose = existing?.candle ? existing.candle.close : roundedPrice;
       candle = {
         time: candlePeriodTime,
         open: prevClose,
-        high: Math.max(prevClose, price),
-        low: Math.min(prevClose, price),
-        close: price,
+        high: Number(Math.max(prevClose, roundedPrice).toFixed(dec)),
+        low: Number(Math.min(prevClose, roundedPrice).toFixed(dec)),
+        close: roundedPrice,
         volume: 1,
       };
     }
 
     const tick: LiveMarketTick = {
       symbol: sym,
-      price,
-      bid: Number((price - spread).toFixed(2)),
-      ask: Number((price + spread).toFixed(2)),
-      high24h: high24 || existing?.high24h || price * 1.02,
-      low24h: low24 || existing?.low24h || price * 0.98,
+      price: roundedPrice,
+      bid: Number((roundedPrice - halfSpread).toFixed(dec)),
+      ask: Number((roundedPrice + halfSpread).toFixed(dec)),
+      high24h: Number((high24 || existing?.high24h || roundedPrice * 1.01).toFixed(dec)),
+      low24h: Number((low24 || existing?.low24h || roundedPrice * 0.99).toFixed(dec)),
       change24hPct: changePct ?? existing?.change24hPct ?? 0,
       volume24h: vol24 || existing?.volume24h || 1000,
       candle,
+      marketOpen: isMarketOpen,
       timestamp: Date.now(),
     };
 
@@ -368,9 +435,7 @@ class LiveMarketStreamerService {
     if (this.sse) {
       try {
         this.sse.close();
-      } catch (_e) {
-        // ignore
-      }
+      } catch (_e) {}
       this.sse = null;
     }
     if (this.ws) {
@@ -379,9 +444,7 @@ class LiveMarketStreamerService {
         this.ws.onerror = null;
         this.ws.onmessage = null;
         this.ws.close();
-      } catch (_e) {
-        // ignore
-      }
+      } catch (_e) {}
       this.ws = null;
     }
   }
@@ -391,6 +454,10 @@ class LiveMarketStreamerService {
     if (this.fallbackPollTimer) {
       clearInterval(this.fallbackPollTimer);
       this.fallbackPollTimer = null;
+    }
+    if (this.sessionWatchTimer) {
+      clearInterval(this.sessionWatchTimer);
+      this.sessionWatchTimer = null;
     }
     this.setStatus('OFFLINE');
   }

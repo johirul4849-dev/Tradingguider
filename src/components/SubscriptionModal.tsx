@@ -17,6 +17,7 @@ import {
   BINANCE_PAYMENT_CONFIG,
   subscriptionService,
   UserSubscriptionRecord,
+  hasActiveAccess,
 } from '../services/subscriptionService';
 
 interface SubscriptionModalProps {
@@ -100,6 +101,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
     }
   };
 
+  const hasAccess = hasActiveAccess(userSubscription);
   const isPendingApproval = userSubscription?.status === 'PENDING_APPROVAL';
   const isActiveSubscribed = userSubscription?.status === 'ACTIVE_SUBSCRIBED';
 
@@ -110,73 +112,80 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
   const trialMins = Math.floor((trialRemainingMs % (1000 * 60 * 60)) / (1000 * 60));
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 overflow-y-auto">
-      <div className="relative w-full max-w-2xl bg-[#131722] border border-[#2A2E39] rounded-2xl shadow-2xl p-6 sm:p-8 text-[#D1D4DC]">
-        {/* Close button */}
-        <button
-          onClick={onClose}
-          className="absolute top-5 right-5 text-[#94A3B8] hover:text-white transition-colors"
-        >
-          <X className="w-5 h-5" />
-        </button>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-3 sm:p-5">
+      <div className="w-full max-w-2xl max-h-[90vh] sm:max-h-[92vh] bg-[#131722] border border-[#2A2E39] rounded-2xl shadow-2xl text-[#D1D4DC] flex flex-col overflow-hidden">
+        {/* Pinned Modal Header */}
+        <div className="shrink-0 px-5 py-4 border-b border-[#2A2E39] bg-[#181C27] flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#2962FF] to-[#00E676] flex items-center justify-center text-white font-extrabold shadow-lg shadow-[#2962FF]/20 shrink-0">
+              <Sparkles className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight truncate">
+                Tradingguider Pro Subscription
+              </h2>
+              <p className="text-xs text-[#94A3B8] truncate">
+                Unrestricted 90-Day Backtest History, 28 Live Pairs &amp; AI SMC Mentorship
+              </p>
+            </div>
+          </div>
 
-        {/* Header */}
-        <div className="flex items-center gap-3 mb-2">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#2962FF] to-[#00E676] flex items-center justify-center text-white font-extrabold shadow-lg shadow-[#2962FF]/20">
-            <Sparkles className="w-5 h-5" />
-          </div>
-          <div>
-            <h2 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
-              Tradingguider Pro Subscription
-            </h2>
-            <p className="text-xs text-[#94A3B8]">
-              Unrestricted 90-Day Backtest History, Sub-Second Live Feed & AI SMC Markings
-            </p>
-          </div>
+          {hasAccess && (
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close subscription modal"
+              className="w-8 h-8 rounded-lg bg-[#2A2E39]/70 hover:bg-[#363A45] text-[#94A3B8] hover:text-white flex items-center justify-center transition-colors shrink-0 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
         </div>
 
-        {/* 24-Hour Free Trial Status Banner */}
-        {userSubscription?.status === 'TRIAL_ACTIVE' && (
-          <div className="my-4 p-3.5 rounded-xl bg-[#00E676]/10 border border-[#00E676]/30 flex items-center justify-between text-xs">
-            <div className="flex items-center gap-2 text-[#00E676] font-semibold">
-              <Clock className="w-4 h-4 animate-spin-slow" />
-              <span>24-Hour Free Trial Active</span>
+        {/* Scrollable Modal Body */}
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-5 sm:p-6 space-y-5">
+          {/* 24-Hour Free Trial Status Banner */}
+          {userSubscription?.status === 'TRIAL_ACTIVE' && hasAccess && (
+            <div className="p-3.5 rounded-xl bg-[#00E676]/10 border border-[#00E676]/30 flex items-center justify-between text-xs gap-2">
+              <div className="flex items-center gap-2 text-[#00E676] font-semibold">
+                <Clock className="w-4 h-4 animate-spin-slow shrink-0" />
+                <span>24-Hour Free Trial Active</span>
+              </div>
+              <div className="font-mono text-white bg-[#00E676]/20 px-2.5 py-1 rounded-md font-bold shrink-0">
+                {trialHours}h {trialMins}m remaining
+              </div>
             </div>
-            <div className="font-mono text-white bg-[#00E676]/20 px-2.5 py-1 rounded-md font-bold">
-              {trialHours}h {trialMins}m remaining
-            </div>
-          </div>
-        )}
+          )}
 
-        {/* 24-Hour Free Trial / Subscription Expired Banner */}
-        {userSubscription?.status === 'TRIAL_EXPIRED' && (
-          <div className="my-4 p-4 rounded-xl bg-rose-500/15 border border-rose-500/40 text-xs">
-            <div className="flex items-center gap-2 text-rose-300 font-bold mb-1">
-              <AlertCircle className="w-4 h-4 text-rose-400" />
-              <span>Free Access / Package Time Ended — Purchase Package to Continue</span>
+          {/* 24-Hour Free Trial / Subscription Expired Banner */}
+          {!hasAccess && !isPendingApproval && (
+            <div className="p-4 rounded-xl bg-rose-500/15 border border-rose-500/40 text-xs">
+              <div className="flex items-center gap-2 text-rose-300 font-bold mb-1">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                <span>Free Access / Package Time Ended — Purchase Package to Continue</span>
+              </div>
+              <p className="text-slate-300">
+                Your free trial or subscription period has ended. Submit a 1, 6, or 12 month Binance payment below; your account will unlock as soon as Admin approves it.
+              </p>
             </div>
-            <p className="text-slate-300">
-              Your free trial period has ended. Select a 1, 6, or 12 month package below to unlock and practice on the live chart and backtest terminal.
-            </p>
-          </div>
-        )}
+          )}
 
-        {/* Pending Approval Notice */}
-        {isPendingApproval && (
-          <div className="my-4 p-4 rounded-xl bg-[#FFB300]/10 border border-[#FFB300]/40 text-xs">
-            <div className="flex items-center gap-2 text-[#FFB300] font-bold mb-1">
-              <Clock className="w-4 h-4" />
-              <span>Payment Verification Pending Admin Approval</span>
+          {/* Pending Approval Notice */}
+          {isPendingApproval && (
+            <div className="p-4 rounded-xl bg-[#FFB300]/10 border border-[#FFB300]/40 text-xs">
+              <div className="flex items-center gap-2 text-[#FFB300] font-bold mb-1">
+                <Clock className="w-4 h-4 shrink-0" />
+                <span>Payment Verification Pending Admin Approval</span>
+              </div>
+              <p className="text-[#94A3B8]">
+                Your Binance transaction{' '}
+                <span className="font-mono text-white">
+                  ({userSubscription?.lastPaymentSubmission?.binanceTxId})
+                </span>{' '}
+                has been submitted. {!hasAccess ? 'Terminal access remains locked until Admin approves your payment.' : 'Admin verifies and activates your package shortly.'}
+              </p>
             </div>
-            <p className="text-[#94A3B8]">
-              Your Binance transaction{' '}
-              <span className="font-mono text-white">
-                ({userSubscription?.lastPaymentSubmission?.binanceTxId})
-              </span>{' '}
-              has been submitted. Admin verifies and unlocks your account shortly.
-            </p>
-          </div>
-        )}
+          )}
 
         {/* Active Subscription Banner */}
         {isActiveSubscribed && (
@@ -201,7 +210,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
         )}
 
         {/* Package Selection Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 my-6">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
           {(Object.keys(SUBSCRIPTION_PACKAGES) as Array<'MONTH_1' | 'MONTH_6' | 'MONTH_12'>).map((pkgKey) => {
             const pkg = SUBSCRIPTION_PACKAGES[pkgKey];
             const isSelected = selectedPkgId === pkgKey;
@@ -340,9 +349,10 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
             </p>
           )}
         </div>
+        </div>
 
-        {/* Submit & Exit Buttons */}
-        <div className="flex items-center justify-between gap-3 pt-3 border-t border-[#2A2E39]">
+        {/* Pinned Footer Actions */}
+        <div className="shrink-0 px-5 py-3.5 bg-[#181C27] border-t border-[#2A2E39] flex flex-wrap items-center justify-between gap-3">
           <div>
             {onSignOut && (
               <button
@@ -359,11 +369,11 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2.5">
-            {userSubscription?.status !== 'TRIAL_EXPIRED' && (
+            {hasAccess && (
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-[#94A3B8] hover:text-white transition-colors cursor-pointer"
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-[#94A3B8] hover:text-white transition-colors cursor-pointer"
               >
                 Close
               </button>
@@ -372,7 +382,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
               type="button"
               onClick={handleSubmitPayment}
               disabled={isSubmitting}
-              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gradient-to-r from-[#2962FF] to-[#00E676] hover:from-[#1E53E5] hover:to-[#00C853] text-xs font-bold text-white shadow-lg shadow-[#2962FF]/30 transition-all cursor-pointer disabled:opacity-50"
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-[#2962FF] to-[#00E676] hover:from-[#1E53E5] hover:to-[#00C853] text-xs font-bold text-white shadow-lg shadow-[#2962FF]/30 transition-all cursor-pointer disabled:opacity-50"
             >
               <ShieldCheck className="w-4 h-4" />
               <span>{isSubmitting ? 'Submitting...' : `Submit Payment ($${finalPrice}) for Approval`}</span>

@@ -8,7 +8,7 @@
 // 6. In-depth pair-specific rules for BTC/USD (24/7 liquidity, Monday sweeps, round number hunts) and XAU/USD (Gold killzones, DXY correlation, deep fib retracements)
 // 7. Multi-language support: Bengali (বাংলা), Banglish, English, Hindi
 
-import { SupportedSymbol, SupportedTimeframe } from '../config/brand';
+import { BRAND_CONFIG, SupportedSymbol, SupportedTimeframe } from '../config/brand';
 import { CandleData } from './marketEngine';
 
 export interface ExecutionBlock {
@@ -171,6 +171,8 @@ export class AiBacktestTeacherEngine {
     timeframe: SupportedTimeframe,
     language: 'bn' | 'banglish' | 'en' | 'hi' = 'bn'
   ): DeepBacktestReport {
+    const meta = BRAND_CONFIG.markets[symbol] || BRAND_CONFIG.markets['BTC/USD'];
+    const dec = meta.decimals;
     const isGold = symbol === 'XAU/USD';
     const circles: ConfirmationCircle[] = [];
 
@@ -178,8 +180,8 @@ export class AiBacktestTeacherEngine {
       return this.getEmptyReport(symbol, timeframe, language);
     }
 
-    // Calculate ATR(14) dynamically across the dataset
-    const atrValues = this.calculateATR(candles, 14);
+    // Calculate ATR(14) dynamically across the dataset with high precision
+    const atrValues = this.calculateATR(candles, 14, dec);
 
     let wins = 0;
     let losses = 0;
@@ -190,14 +192,17 @@ export class AiBacktestTeacherEngine {
 
     const scanEnd = Math.min(candles.length - 1, candles.length);
     const step = candles.length > 800 ? 3 : 2;
+    const fallbackAtr = meta.defaultBracketDistance * 0.45;
+    const minCandleRange = Math.max(meta.tickSize * 2, meta.defaultPrice * 0.00005);
+    const minRiskDistance = Math.max(meta.defaultBracketDistance * 0.35, meta.tickSize * 8);
 
     for (let i = 25; i < scanEnd - 5; i += step) {
       const c = candles[i];
-      const atr = atrValues[i] || (isGold ? 3.5 : 220);
+      const atr = atrValues[i] || fallbackAtr;
       const prevPool = candles.slice(Math.max(0, i - 18), i);
       const prevLow = Math.min(...prevPool.map((p) => p.low));
       const prevHigh = Math.max(...prevPool.map((p) => p.high));
-      const range = Math.max(0.1, c.high - c.low);
+      const range = Math.max(minCandleRange, c.high - c.low);
       const lowerWick = Math.min(c.open, c.close) - c.low;
       const upperWick = c.high - Math.max(c.open, c.close);
       const body = Math.abs(c.close - c.open);
@@ -206,10 +211,6 @@ export class AiBacktestTeacherEngine {
       const avgVol = prevPool.reduce((acc, v) => acc + v.volume, 0) / prevPool.length || 500;
       const volumeRatio = c.volume / avgVol;
 
-      // 1. BULLISH 99% A+ / HIGH CONVICTION SETUP:
-      // Condition A: True Liquidity Sweep below major 18-bar swing low
-      // Condition B: Strong buyer absorption wick (>= 35% of bar) OR wide bullish displacement close
-      // Condition C: Close above the previous swing low (reclaim)
       const isBullishSweepReclaim = c.low < prevLow && c.close > prevLow && lowerWick >= range * 0.35;
       const isInstitutionalDisplacement =
         c.close > c.open &&
@@ -221,16 +222,14 @@ export class AiBacktestTeacherEngine {
         const isSniperAplus = isBullishSweepReclaim && (volumeRatio >= 1.2 || body >= range * 0.45);
         if (isSniperAplus) sniperAplusCount++;
 
-        const entry = Number(c.close.toFixed(2));
-        // Dynamic Safe SL: Placed strictly below the sweep wick PLUS a safety buffer (1.2x ATR)
-        // This is the core fix requested by user: prevents the typical early wick stop-out!
-        const slSafetyBuffer = Number((atr * (isGold ? 0.8 : 0.65)).toFixed(2));
-        const sl = Number((c.low - slSafetyBuffer).toFixed(2));
-        const riskDistance = Math.max(isGold ? 2.5 : 120, entry - sl);
+        const entry = Number(c.close.toFixed(dec));
+        const slSafetyBuffer = Number((atr * 0.75).toFixed(dec));
+        const sl = Number((c.low - slSafetyBuffer).toFixed(dec));
+        const riskDistance = Math.max(minRiskDistance, entry - sl);
 
-        const tp1 = Number((entry + riskDistance * 1.6).toFixed(2));
-        const tp2 = Number((entry + riskDistance * 3.2).toFixed(2));
-        const tp3 = Number((entry + riskDistance * 5.0).toFixed(2));
+        const tp1 = Number((entry + riskDistance * 1.6).toFixed(dec));
+        const tp2 = Number((entry + riskDistance * 3.2).toFixed(dec));
+        const tp3 = Number((entry + riskDistance * 5.0).toFixed(dec));
         const rr = 3.2;
 
         // Check simulated outcome in future candles
@@ -313,15 +312,14 @@ export class AiBacktestTeacherEngine {
         const isSniperAplus = isBearishSweepReclaim && (volumeRatio >= 1.2 || body >= range * 0.45);
         if (isSniperAplus) sniperAplusCount++;
 
-        const entry = Number(c.close.toFixed(2));
-        // Dynamic Safe SL: Placed strictly above the sweep high PLUS safety buffer
-        const slSafetyBuffer = Number((atr * (isGold ? 0.8 : 0.65)).toFixed(2));
-        const sl = Number((c.high + slSafetyBuffer).toFixed(2));
-        const riskDistance = Math.max(isGold ? 2.5 : 120, sl - entry);
+        const entry = Number(c.close.toFixed(dec));
+        const slSafetyBuffer = Number((atr * 0.75).toFixed(dec));
+        const sl = Number((c.high + slSafetyBuffer).toFixed(dec));
+        const riskDistance = Math.max(minRiskDistance, sl - entry);
 
-        const tp1 = Number((entry - riskDistance * 1.6).toFixed(2));
-        const tp2 = Number((entry - riskDistance * 3.2).toFixed(2));
-        const tp3 = Number((entry - riskDistance * 5.0).toFixed(2));
+        const tp1 = Number((entry - riskDistance * 1.6).toFixed(dec));
+        const tp2 = Number((entry - riskDistance * 3.2).toFixed(dec));
+        const tp3 = Number((entry - riskDistance * 5.0).toFixed(dec));
         const rr = 3.2;
 
         // Check simulated outcome in future candles
@@ -406,7 +404,9 @@ export class AiBacktestTeacherEngine {
       avgRiskReward: 3.2,
       bestSetupType: isGold
         ? '99% London/NY Killzone Sweep + Safe ATR Buffered SL (1:3.2 R:R)'
-        : '99% Bitcoin Monday Range Sweep + Institutional Displacement Block (1:3.2 R:R)',
+        : meta.category === 'Crypto'
+        ? '99% Bitcoin Monday Range Sweep + Institutional Displacement Block (1:3.2 R:R)'
+        : `99% ${symbol} London/NY Killzone Sweep + Institutional Order Block (1:3.2 R:R)`,
       maxConsecutiveWins: maxConsecutive || 6,
       circles,
       pairSummary: this.getPairMasterySummary(symbol, language),
@@ -425,8 +425,10 @@ export class AiBacktestTeacherEngine {
     timeframe: SupportedTimeframe,
     language: 'bn' | 'banglish' | 'en' | 'hi' = 'bn'
   ): InspectedCandleSymptom {
+    const meta = BRAND_CONFIG.markets[symbol] || BRAND_CONFIG.markets['BTC/USD'];
+    const dec = meta.decimals;
     const isGold = symbol === 'XAU/USD';
-    const range = Math.max(0.01, candle.high - candle.low);
+    const range = Math.max(meta.tickSize * 2, candle.high - candle.low);
     const upperWick = candle.high - Math.max(candle.open, candle.close);
     const lowerWick = Math.min(candle.open, candle.close) - candle.low;
     const body = Math.abs(candle.close - candle.open);
@@ -443,14 +445,13 @@ export class AiBacktestTeacherEngine {
       : 'MODERATE SELL';
     let prob = 74;
 
-    // Detect Pin Bar / Wick Absorption
     if (lowerWickPct >= 45) {
-      candleName = isGold ? 'Gold Institutional Demand Absorption Pinbar' : 'BTC 99% Bullish Liquidity Sweep Pinbar';
+      candleName = `${symbol} Institutional Demand Absorption Pinbar`;
       sentiment = 'BULLISH';
       bias = 'STRONG BUY';
       prob = 92;
     } else if (upperWickPct >= 45) {
-      candleName = isGold ? 'Gold Supply Exhaustion Pinbar' : 'BTC 99% Bearish Liquidity Sweep Pinbar';
+      candleName = `${symbol} Supply Exhaustion Pinbar`;
       sentiment = 'BEARISH';
       bias = 'STRONG SELL';
       prob = 92;
@@ -471,12 +472,13 @@ export class AiBacktestTeacherEngine {
     const volMult = Number((candle.volume / avgVol).toFixed(1));
 
     const projectedTarget = isBull
-      ? Number((candle.close + range * 2.8).toFixed(2))
-      : Number((candle.close - range * 2.8).toFixed(2));
+      ? Number((candle.close + range * 2.8).toFixed(dec))
+      : Number((candle.close - range * 2.8).toFixed(dec));
     const invLevel = isBull ? candle.low : candle.high;
+    const bufferDist = meta.defaultBracketDistance * 0.45;
     const safeSL = isBull
-      ? Number((candle.low - (isGold ? 1.8 : 85)).toFixed(2))
-      : Number((candle.high + (isGold ? 1.8 : 85)).toFixed(2));
+      ? Number((candle.low - bufferDist).toFixed(dec))
+      : Number((candle.high + bufferDist).toFixed(dec));
 
     const diagnosis = this.formatSymptomDiagnosis(
       candleName,
@@ -515,46 +517,50 @@ export class AiBacktestTeacherEngine {
   // --- Helper Builders for 99% A+ Sniper Setups ---
 
   private static buildBullishSniperCircle(opts: any): ConfirmationCircle {
+    const meta = BRAND_CONFIG.markets[opts.symbol as SupportedSymbol] || BRAND_CONFIG.markets['BTC/USD'];
+    const dec = meta.decimals;
     const isGold = opts.symbol === 'XAU/USD';
     const lang = opts.language;
     const isAplus = opts.isSniperAplus;
 
-    const entryBoxTop = Number((opts.entry + opts.range * 0.15).toFixed(2));
-    const entryBoxBottom = Number((opts.c.low + opts.lowerWick * 0.6).toFixed(2));
+    const entryBoxTop = Number((opts.entry + opts.range * 0.15).toFixed(dec));
+    const entryBoxBottom = Number((opts.c.low + opts.lowerWick * 0.6).toFixed(dec));
 
     let title = isAplus
       ? '💎 ৯৯% A+ ইনস্টিটিউশনাল স্নাইপার BUY সেটআপ'
       : 'বুলিশ কনফার্মেশন ক্যান্ডেল (BUY Setup)';
-    let whyConfirmed = `সুইং লো এর নিচে প্রাতিষ্ঠানিক লিকুইডিটি সুইপ করে ${opts.lowerWick.toFixed(2)} পয়েন্টের স্ট্রং বায়ার অ্যাবসর্বশন তৈরি হয়েছে। স্মার্ট মানি রিটেল ট্রেডারদের স্টপ লস হান্ট করে লং অর্ডার ফিল করেছে।`;
+    let whyConfirmed = `সুইং লো এর নিচে প্রাতিষ্ঠানিক লিকুইডিটি সুইপ করে ${opts.lowerWick.toFixed(dec)} পয়েন্টের স্ট্রং বায়ার অ্যাবসর্বশন তৈরি হয়েছে। স্মার্ট মানি রিটেল ট্রেডারদের স্টপ লস হান্ট করে লং অর্ডার ফিল করেছে।`;
     let howToTrade = `গ্রিন এন্ট্রি বক্সে (${entryBoxBottom} - ${entryBoxTop}) প্রাইস টাচ করলে BUY এন্ট্রি নিন। স্টপ লস সুইং উইকের বাইরে সেফ জোনে ${opts.sl} এ রাখুন। TP1 (${opts.tp1}) এ ৫০% প্রফিট বুক করে SL ব্রেক-ইভেনে নিয়ে আসুন।`;
     let commonMistake =
       'উইকের একেবারে কাছে টাইট স্টপ লস রাখা! যার ফলে মার্কেট আরেকবার সামান্য সুইপ করলেই রিটেল ট্রেডাররা অকালে স্টপ আউট হয়ে যায়।';
     let proTip = isGold
       ? 'XAU/USD লন্ডন ওপেন (08:00 UTC) অথবা নিউইয়র্ক ওপেন (13:00 UTC) কিলজোনে এই সেটআপ ৯৫%+ উইনরেট দিয়ে ৩.২R প্রফিট দেয়।'
-      : 'BTC তে এশিয়ান সেশনের লো সুইপ হওয়ার পর এই গ্রিন স্নাইপার ব্লক তৈরি হলে ম্যাসিভ পাম্প আসে।';
+      : meta.category === 'Crypto'
+      ? 'BTC তে এশিয়ান সেশনের লো সুইপ হওয়ার পর এই গ্রিন স্নাইপার ব্লক তৈরি হলে ম্যাসিভ পাম্প আসে।'
+      : `${opts.symbol} এ লন্ডন ওপেন (07:00-09:00 UTC) ও নিউইয়র্ক ওভারল্যাপ সেশনে এশিয়ান লো সুইপ হলে ৯০%+ হাই-উইনরেট মুভ দেয়।`;
 
     if (lang === 'banglish') {
       title = isAplus
         ? '💎 99% A+ Institutional Sniper BUY Setup'
         : 'Bullish Confirmation Candle (BUY Setup)';
-      whyConfirmed = `Major Swing Low er niche Liquidity Sweep complete hoyeche (${opts.lowerWick.toFixed(2)} pts rejection wick). Smart Money retail traders der stop loss hunt kore Long position fill koreche.`;
+      whyConfirmed = `Major Swing Low er niche Liquidity Sweep complete hoyeche (${opts.lowerWick.toFixed(dec)} rejection wick). Smart Money retail traders der stop loss hunt kore Long position fill koreche.`;
       howToTrade = `Green Entry Block a (${entryBoxBottom} - ${entryBoxTop}) price tap korle BUY entry nin. Safe Stop Loss rakhun ${opts.sl} a. TP1 a 50% profit book kore SL Break-Even a ana mandatory.`;
       commonMistake =
         'Candle wick er khub kache tight SL rakha! Karon smart money shob shomoy ekta secondary micro-sweep kore retail der out kore dei.';
       proTip = isGold
         ? 'Gold London Open (08:00 UTC) ba NY Open a ei setup 95%+ winrate dei.'
-        : 'BTC te Asia session low sweep kore ei block create hole huge rally ashe.';
+        : `${opts.symbol} London / NY session open killzone a Asia low sweep korle strong move ashe.`;
     } else if (lang === 'en') {
       title = isAplus
         ? '💎 99% A+ Institutional Sniper BUY Setup'
         : 'Bullish Confirmation Candle (BUY Setup)';
-      whyConfirmed = `Liquidity sweep below swing low with ${opts.lowerWick.toFixed(2)} pt buyer absorption wick. Smart money absorbed resting retail stop orders before launching displacement.`;
+      whyConfirmed = `Liquidity sweep below swing low with ${opts.lowerWick.toFixed(dec)} buyer absorption wick. Smart money absorbed resting retail stop orders before launching displacement.`;
       howToTrade = `Enter inside the Green Sniper Entry Block (${entryBoxBottom} - ${entryBoxTop}). Place Stop Loss at ${opts.sl} (outside sweep noise). Take 50% profit at TP1 (${opts.tp1}) and move SL to Break-Even.`;
       commonMistake =
         'Placing SL inside the sweep wick noise! Retail traders get stopped out prematurely because they lack the dynamic ATR safety buffer.';
       proTip = isGold
         ? 'Gold respects London Killzone (08:00 UTC) sweeps with clean 1:3.2 R:R expansions.'
-        : 'BTC sweeps Asia session lows before expanding into overhead liquidity.';
+        : `${opts.symbol} sweeps prior session liquidity before expanding in the institutional killzone.`;
     }
 
     return {
@@ -660,44 +666,48 @@ export class AiBacktestTeacherEngine {
   }
 
   private static buildBearishSniperCircle(opts: any): ConfirmationCircle {
+    const meta = BRAND_CONFIG.markets[opts.symbol as SupportedSymbol] || BRAND_CONFIG.markets['BTC/USD'];
+    const dec = meta.decimals;
     const isGold = opts.symbol === 'XAU/USD';
     const lang = opts.language;
     const isAplus = opts.isSniperAplus;
 
-    const entryBoxTop = Number((opts.c.high - opts.upperWick * 0.6).toFixed(2));
-    const entryBoxBottom = Number((opts.entry - opts.range * 0.15).toFixed(2));
+    const entryBoxTop = Number((opts.c.high - opts.upperWick * 0.6).toFixed(dec));
+    const entryBoxBottom = Number((opts.entry - opts.range * 0.15).toFixed(dec));
 
     let title = isAplus
       ? '💎 ৯৯% A+ ইনস্টিটিউশনাল স্নাইপার SELL সেটআপ'
       : 'বিয়ারিশ কনফার্মেশন ক্যান্ডেল (SELL Setup)';
-    let whyConfirmed = `সুইং হাই এর উপরে বাই-সাইড লিকুইডিটি সুইপ করে ${opts.upperWick.toFixed(2)} পয়েন্টের সেলার ডিসপ্লেসমেন্ট উইক এসেছে। ব্রেকআউট বায়ারদের ট্র্যাপ করে স্মার্ট মানি শর্ট অর্ডার এক্সিকিউট করেছে।`;
+    let whyConfirmed = `সুইং হাই এর উপরে বাই-সাইড লিকুইডিটি সুইপ করে ${opts.upperWick.toFixed(dec)} পয়েন্টের সেলার ডিসপ্লেসমেন্ট উইক এসেছে। ব্রেকআউট বায়ারদের ট্র্যাপ করে স্মার্ট মানি শর্ট অর্ডার এক্সিকিউট করেছে।`;
     let howToTrade = `রেড এন্ট্রি বক্সে (${entryBoxBottom} - ${entryBoxTop}) প্রাইস টেস্ট করলে SELL এন্ট্রি নিন। সেফ স্টপ লস সুইং উইকের বাইরে ${opts.sl} এ রাখুন। TP1 (${opts.tp1}) এ ৫০% বুক করে SL ব্রেক-ইভেনে নিয়ে আসুন।`;
     let commonMistake =
       'ব্রেকআউট দেখে টপে BUY করা! প্রাতিষ্ঠানিক ট্রেডাররা সর্বদা রিটেল ব্রেকআউট বায়ারদের লিকুইডিটি হিসেবে ব্যবহার করে সেল করে।';
     let proTip = isGold
       ? 'Gold এ DXY শক্তিশালী থাকলে এবং নিউইয়র্ক সেশনে এই ক্যান্ডেল দেখা গেলে দ্রুত টার্গেটে পৌঁছে যায়।'
-      : 'BTC তে রাউন্ড নাম্বার যেমন $85k বা $90k এ এরকম সুইপ দেখা দিলে বড় সেল অফ শুরু হয়।';
+      : meta.category === 'Crypto'
+      ? 'BTC তে রাউন্ড নাম্বার যেমন $85k বা $90k এ এরকম সুইপ দেখা দিলে বড় সেল অফ শুরু হয়।'
+      : `${opts.symbol} লন্ডন/নিউইয়র্ক সেশনে সুইং হাই সুইপ করে ফেক ব্রেকআউট দিলে দ্রুত নিচের ডিমান্ড পুলে নামে।`;
 
     if (lang === 'banglish') {
       title = isAplus
         ? '💎 99% A+ Institutional Sniper SELL Setup'
         : 'Bearish Confirmation Candle (SELL Setup)';
-      whyConfirmed = `Swing High er upore Buy-Side Liquidity sweep kore ${opts.upperWick.toFixed(2)} point er seller displacement toiri hoyeche. Late breakout buyer der trap kore smart money short orders execute koreche.`;
+      whyConfirmed = `Swing High er upore Buy-Side Liquidity sweep kore ${opts.upperWick.toFixed(dec)} seller displacement toiri hoyeche. Late breakout buyer der trap kore smart money short orders execute koreche.`;
       howToTrade = `Red Entry Block a (${entryBoxBottom} - ${entryBoxTop}) price retest korle SELL entry nin. Safe Stop Loss rakhun ${opts.sl} a. TP1 a 50% profit book kore SL Break-Even a ana mandatory.`;
       commonMistake = 'Top a breakout dekhe Buy kore trap a pora, ebong khub tight SL diye out hoye jawa.';
       proTip = isGold
         ? 'Gold New York session a DXY rally korle ei sell setup khub fast TP hit kore.'
-        : 'BTC major round number level theke rejection dile high-winrate sell dei.';
+        : `${opts.symbol} major session high liquidity sweep kore rejection dile fast TP hit kore.`;
     } else if (lang === 'en') {
       title = isAplus
         ? '💎 99% A+ Institutional Sniper SELL Setup'
         : 'Bearish Confirmation Candle (SELL Setup)';
-      whyConfirmed = `Buy-side liquidity sweep above swing high with ${opts.upperWick.toFixed(2)} pt seller rejection wick. Trapped late retail breakout longs into institutional sell distribution.`;
+      whyConfirmed = `Buy-side liquidity sweep above swing high with ${opts.upperWick.toFixed(dec)} seller rejection wick. Trapped late retail breakout longs into institutional sell distribution.`;
       howToTrade = `Enter inside the Red Sniper Entry Block (${entryBoxBottom} - ${entryBoxTop}). Place Stop Loss safely at ${opts.sl} (outside sweep noise). Take 50% at TP1 (${opts.tp1}) and move SL to Break-Even.`;
       commonMistake = 'Buying the false breakout top and placing SL right on top of the wick noise.';
       proTip = isGold
         ? 'Gold reacts aggressively to US session data and DXY rallies with 1:3.2 R:R selloffs.'
-        : 'BTC round-number fakeouts ($85k / $90k) provide rapid liquidation runs.';
+        : `${opts.symbol} liquidity sweeps at session highs provide clean institutional reversals.`;
     }
 
     return {
@@ -802,9 +812,10 @@ export class AiBacktestTeacherEngine {
     };
   }
 
-  private static calculateATR(candles: CandleData[], period = 14): number[] {
+  private static calculateATR(candles: CandleData[], period = 14, decimals = 2): number[] {
     const result: number[] = [];
     if (candles.length === 0) return result;
+    const prec = Math.max(decimals, 5);
 
     let trSum = 0;
     for (let i = 0; i < candles.length; i++) {
@@ -814,11 +825,11 @@ export class AiBacktestTeacherEngine {
 
       if (i < period) {
         trSum += tr;
-        result.push(Number((trSum / (i + 1)).toFixed(2)));
+        result.push(Number((trSum / (i + 1)).toFixed(prec)));
       } else {
         const prevAtr = result[i - 1];
         const atr = (prevAtr * (period - 1) + tr) / period;
-        result.push(Number(atr.toFixed(2)));
+        result.push(Number(atr.toFixed(prec)));
       }
     }
     return result;
@@ -879,9 +890,9 @@ export class AiBacktestTeacherEngine {
   }
 
   private static getPairMasterySummary(symbol: SupportedSymbol, lang: string) {
-    const isGold = symbol === 'XAU/USD';
+    const meta = BRAND_CONFIG.markets[symbol] || BRAND_CONFIG.markets['BTC/USD'];
 
-    if (isGold) {
+    if (symbol === 'XAU/USD') {
       return {
         title: 'XAU/USD (Gold) Institutional Trading Playbook',
         description: 'Gold is heavily influenced by London Open & NY Killzones, DXY inverse correlation, and 61.8%-78.6% deep retracements.',
@@ -895,6 +906,41 @@ export class AiBacktestTeacherEngine {
           'Rule 1: Never trade Gold during Asia session low-liquidity ranges (00:00 - 06:00 UTC).',
           'Rule 2: Look for London Session highs/lows to be swept at 13:00-14:00 UTC New York Open.',
           'Rule 3: Always check US high-impact news (CPI, NFP, FOMC) before executing large lot orders.',
+        ],
+      };
+    }
+
+    if (symbol === 'XAG/USD') {
+      return {
+        title: 'XAG/USD (Silver Spot) Institutional Playbook',
+        description: 'Silver mirrors Gold institutional direction with sharper stop-hunts around Asia/London ranges and NY COMEX open.',
+        keyCharacteristics: [
+          '⚡ Higher Pip Volatility: Silver prints sharper liquidity wicks than XAU/USD during NY data releases.',
+          '🔗 Gold SMT Divergence: Check if XAU/USD sweeps a low while XAG/USD fails to make a lower low for high-probability reversals.',
+          '⏰ Market Schedule: Trades Sunday 22:00 UTC to Friday 22:00 UTC and freezes cleanly over the weekend.',
+        ],
+        goldenRules: [
+          'Rule 1: Confirm SMT divergence with XAU/USD before taking Silver reversal trades.',
+          'Rule 2: Use ATR buffer outside the sweep wick to avoid NY open stop hunts.',
+          'Rule 3: Avoid holding thin spread scalps into Friday 21:45 UTC weekend close.',
+        ],
+      };
+    }
+
+    if (meta.category === 'Forex Major' || meta.category === 'Forex Cross') {
+      return {
+        title: `${symbol} (${meta.name}) Institutional Forex Playbook`,
+        description: `${symbol} respects interbank session liquidity (Asian Range -> London Judas Sweep -> NY Expansion) and freezes Friday 22:00 UTC until Sunday 22:00 UTC reopen.`,
+        keyCharacteristics: [
+          `⏰ Session Rhythm: Asian range (00:00-06:00 UTC) builds liquidity swept at London Open (07:00-09:00 UTC) and NY Open (12:00-15:00 UTC).`,
+          `📐 Precision Pricing: Quoted to ${meta.decimals} decimals (1 Pip = ${meta.pipSize}) with institutional Order Blocks and FVGs.`,
+          '🏦 Weekend Auto-Pause: Pair automatically freezes at Friday 22:00 UTC settlement and auto-resumes Sunday 22:00 UTC.',
+          '🎯 Asymmetric Target: Anchor Stop Loss outside sweep wick + ATR buffer targeting opposing session high/low at 1:3 R:R.',
+        ],
+        goldenRules: [
+          `Rule 1: Mark Asian High & Asian Low before London Open on ${symbol}; trade the sweep reclaim.`,
+          'Rule 2: Avoid chasing news candles during NFP/CPI/Central Bank rate releases without displacement confirmation.',
+          'Rule 3: Respect weekend close — never invent synthetic price ticks while interbank FX desks are closed.',
         ],
       };
     }

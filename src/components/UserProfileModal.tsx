@@ -26,7 +26,7 @@ import {
   SUBSCRIPTION_PACKAGES,
   calculateRemainingCountdown,
 } from '../services/subscriptionService';
-import { BRAND_CONFIG, SupportedSymbol, SupportedTimeframe } from '../config/brand';
+import { BRAND_CONFIG, ALL_SUPPORTED_SYMBOLS, MARKET_CATEGORIES, SupportedSymbol, SupportedTimeframe } from '../config/brand';
 
 interface UserProfileModalProps {
   isOpen: boolean;
@@ -92,7 +92,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-fadeIn">
       <div className="relative w-full max-w-xl rounded-2xl bg-[#0F172A] border border-slate-700 shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
         {/* Modal Header */}
-        <div className="p-5 border-b border-slate-800 bg-[#131E36] flex items-center justify-between">
+        <div className="shrink-0 p-5 border-b border-slate-800 bg-[#131E36] flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-[#2962FF] to-[#00E5FF] p-0.5 shadow-md">
               <div className="w-full h-full bg-[#0F172A] rounded-[10px] flex items-center justify-center text-white">
@@ -115,14 +115,14 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+            className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
         {/* Modal Body */}
-        <div className="p-6 overflow-y-auto space-y-6 text-sm text-slate-200">
+        <div className="flex-1 min-h-0 p-6 overflow-y-auto overscroll-contain space-y-6 text-sm text-slate-200">
           {/* User Identity Card */}
           <div className="p-4 rounded-xl bg-[#131D33] border border-slate-700/80 shadow-inner flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <div className="flex items-center gap-3.5">
@@ -321,8 +321,15 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                   }}
                   className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono focus:outline-none focus:border-blue-500 cursor-pointer"
                 >
-                  <option value="BTC/USD">BTC/USD (Bitcoin Spot)</option>
-                  <option value="XAU/USD">XAU/USD (Gold COMEX Spot)</option>
+                  {MARKET_CATEGORIES.map((category) => (
+                    <optgroup key={category} label={category}>
+                      {ALL_SUPPORTED_SYMBOLS.filter((s) => BRAND_CONFIG.markets[s].category === category).map((sym) => (
+                        <option key={sym} value={sym}>
+                          {sym} ({BRAND_CONFIG.markets[sym].name})
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
                 </select>
               </div>
 
@@ -347,7 +354,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         </div>
 
         {/* Modal Footer with Clear, High-Visibility Logout Button */}
-        <div className="p-5 border-t border-slate-800 bg-[#111A2E] flex flex-col sm:flex-row items-center justify-between gap-3">
+        <div className="shrink-0 p-5 border-t border-slate-800 bg-[#111A2E] flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="text-xs text-slate-400 flex items-center gap-2">
             <Shield className="w-4 h-4 text-emerald-400 shrink-0" />
             <span>Encrypted cloud session via Firebase Authentication</span>

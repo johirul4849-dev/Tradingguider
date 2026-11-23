@@ -2,6 +2,15 @@
 // Supports 24-hour Free Backtest Trial, Binance Payments (ID: 794380283),
 // Influencer Affiliate Program with commissions and JPG export, and Smart Admin controls.
 
+import {
+  auth,
+  syncOrCreateSubscriptionInDb,
+  submitPaymentToDb,
+  markSubscriptionExpiredInDb,
+  adminUpdateSubscriptionInDb,
+  SubscriptionRecordDb,
+} from '../lib/firebase';
+
 export interface SubscriptionPackage {
   id: 'MONTH_1' | 'MONTH_6' | 'MONTH_12';
   name: string;
@@ -68,6 +77,25 @@ export interface UserSubscriptionRecord {
     status: 'PENDING' | 'APPROVED' | 'REJECTED';
     rejectionReason?: string;
   };
+}
+
+export function hasActiveAccess(
+  sub: UserSubscriptionRecord | null | undefined,
+  now: number = Date.now()
+): boolean {
+  if (!sub) return false;
+  if (sub.status === 'ACTIVE_SUBSCRIBED') {
+    return Boolean(sub.subscriptionExpiresAt && sub.subscriptionExpiresAt > now);
+  }
+  if (sub.status === 'TRIAL_ACTIVE') {
+    return sub.freeTrialExpiresAt > now;
+  }
+  if (sub.status === 'PENDING_APPROVAL') {
+    // Only allow continued usage if initial 24h free trial is still running;
+    // once expired, account stays strictly locked until Admin approves.
+    return sub.freeTrialExpiresAt > now;
+  }
+  return false;
 }
 
 export interface InfluencerRecord {
@@ -394,18 +422,108 @@ class SubscriptionService {
 
   // --- USER SUBSCRIPTION & 24H TRIAL LOGIC ---
 
+  private normalizeSubRecord(record: SubscriptionRecordDb | UserSubscriptionRecord): UserSubscriptionRecord {
+    const clean: UserSubscriptionRecord = {
+      uid: record.uid,
+      email: record.email,
+      displayName: record.displayName,
+      firstLoginAt: Number(record.firstLoginAt),
+      freeTrialExpiresAt: Number(record.freeTrialExpiresAt),
+      status: record.status,
+    };
+    if (record.activePackageId) clean.activePackageId = record.activePackageId;
+    if (record.subscriptionExpiresAt !== undefined) {
+      clean.subscriptionExpiresAt = Number(record.subscriptionExpiresAt);
+    }
+    if (record.lastPaymentSubmission) {
+      clean.lastPaymentSubmission = { ...record.lastPaymentSubmission };
+    }
+    return clean;
+  }
+
+  public applyRemoteSubscription(remote: SubscriptionRecordDb): UserSubscriptionRecord {
+    const normalized = this.normalizeSubRecord(remote);
+    const now = Date.now();
+    if (
+      normalized.status === 'ACTIVE_SUBSCRIBED' &&
+      (!normalized.subscriptionExpiresAt || normalized.subscriptionExpiresAt <= now)
+    ) {
+      normalized.status = 'TRIAL_EXPIRED';
+      if (auth.currentUser?.uid === normalized.uid) {
+        markSubscriptionExpiredInDb(normalized.uid).catch(() => {});
+      }
+    } else if (normalized.status === 'TRIAL_ACTIVE' && normalized.freeTrialExpiresAt <= now) {
+      normalized.status = 'TRIAL_EXPIRED';
+      if (auth.currentUser?.uid === normalized.uid) {
+        markSubscriptionExpiredInDb(normalized.uid).catch(() => {});
+      }
+    }
+    this.subscriptions[normalized.uid] = normalized;
+    this.saveSubscriptions();
+    return normalized;
+  }
+
+  public mergeRemoteSubscriptions(remotes: SubscriptionRecordDb[]): void {
+    const now = Date.now();
+    remotes.forEach((remote) => {
+      const normalized = this.normalizeSubRecord(remote);
+      if (
+        normalized.status === 'ACTIVE_SUBSCRIBED' &&
+        (!normalized.subscriptionExpiresAt || normalized.subscriptionExpiresAt <= now)
+      ) {
+        normalized.status = 'TRIAL_EXPIRED';
+      } else if (normalized.status === 'TRIAL_ACTIVE' && normalized.freeTrialExpiresAt <= now) {
+        normalized.status = 'TRIAL_EXPIRED';
+      }
+      this.subscriptions[normalized.uid] = normalized;
+    });
+    this.saveSubscriptions();
+  }
+
+  public async syncUserSubscriptionWithFirestore(
+    uid: string,
+    email: string,
+    displayName: string
+  ): Promise<UserSubscriptionRecord> {
+    if (auth.currentUser && auth.currentUser.uid === uid) {
+      try {
+        const remote = await syncOrCreateSubscriptionInDb(uid, email, displayName);
+        return this.applyRemoteSubscription(remote);
+      } catch (err) {
+        console.warn('Firestore subscription sync fallback to local cache:', err);
+      }
+    }
+    return this.getOrCreateUserSubscription(uid, email, displayName);
+  }
+
+  private persistAdminMutationToDb(record: UserSubscriptionRecord) {
+    if (auth.currentUser && auth.currentUser.email === 'johirul4891@gmail.com') {
+      adminUpdateSubscriptionInDb(record as SubscriptionRecordDb).catch((err) => {
+        console.warn('Firestore admin subscription sync notice:', err);
+      });
+    }
+  }
+
   public getOrCreateUserSubscription(uid: string, email: string, displayName: string): UserSubscriptionRecord {
     const existing = this.subscriptions[uid];
     const now = Date.now();
 
     if (existing) {
-      // Check if active subscription expired
-      if (existing.status === 'ACTIVE_SUBSCRIBED' && existing.subscriptionExpiresAt && existing.subscriptionExpiresAt < now) {
+      if (
+        existing.status === 'ACTIVE_SUBSCRIBED' &&
+        (!existing.subscriptionExpiresAt || existing.subscriptionExpiresAt <= now)
+      ) {
         existing.status = 'TRIAL_EXPIRED';
         this.saveSubscriptions();
-      } else if (existing.status === 'TRIAL_ACTIVE' && existing.freeTrialExpiresAt < now) {
+        if (auth.currentUser?.uid === uid) {
+          markSubscriptionExpiredInDb(uid).catch(() => {});
+        }
+      } else if (existing.status === 'TRIAL_ACTIVE' && existing.freeTrialExpiresAt <= now) {
         existing.status = 'TRIAL_EXPIRED';
         this.saveSubscriptions();
+        if (auth.currentUser?.uid === uid) {
+          markSubscriptionExpiredInDb(uid).catch(() => {});
+        }
       }
       return existing;
     }
@@ -432,12 +550,21 @@ class SubscriptionService {
     const sub = this.subscriptions[uid];
     if (!sub) return null;
     const now = Date.now();
-    if (sub.status === 'ACTIVE_SUBSCRIBED' && sub.subscriptionExpiresAt && sub.subscriptionExpiresAt < now) {
+    if (
+      sub.status === 'ACTIVE_SUBSCRIBED' &&
+      (!sub.subscriptionExpiresAt || sub.subscriptionExpiresAt <= now)
+    ) {
       sub.status = 'TRIAL_EXPIRED';
       this.saveSubscriptions();
-    } else if (sub.status === 'TRIAL_ACTIVE' && sub.freeTrialExpiresAt < now) {
+      if (auth.currentUser?.uid === uid) {
+        markSubscriptionExpiredInDb(uid).catch(() => {});
+      }
+    } else if (sub.status === 'TRIAL_ACTIVE' && sub.freeTrialExpiresAt <= now) {
       sub.status = 'TRIAL_EXPIRED';
       this.saveSubscriptions();
+      if (auth.currentUser?.uid === uid) {
+        markSubscriptionExpiredInDb(uid).catch(() => {});
+      }
     }
     return sub;
   }
@@ -471,17 +598,24 @@ class SubscriptionService {
       }
     }
 
-    user.status = 'PENDING_APPROVAL';
-    user.lastPaymentSubmission = {
+    const submission = {
       packageId,
       amountPaid: finalPrice,
       binanceTxId: binanceTxId.trim(),
-      promoCodeUsed: validPromo,
+      ...(validPromo ? { promoCodeUsed: validPromo } : {}),
       submittedAt: Date.now(),
-      status: 'PENDING',
+      status: 'PENDING' as const,
     };
 
+    user.status = 'PENDING_APPROVAL';
+    user.lastPaymentSubmission = submission;
+
     this.saveSubscriptions();
+    if (auth.currentUser?.uid === uid) {
+      submitPaymentToDb(uid, submission).catch((err) => {
+        console.warn('Firestore payment request sync notice:', err);
+      });
+    }
     return {
       success: true,
       message: 'Payment submitted successfully! Waiting for Admin verification.',
@@ -521,6 +655,7 @@ class SubscriptionService {
     }
 
     this.saveSubscriptions();
+    this.persistAdminMutationToDb(user);
     return true;
   }
 
@@ -533,6 +668,7 @@ class SubscriptionService {
     user.lastPaymentSubmission.rejectionReason = reason || 'Transaction could not be verified on Binance.';
     user.status = 'TRIAL_EXPIRED';
     this.saveSubscriptions();
+    this.persistAdminMutationToDb(user);
     return true;
   }
 
@@ -546,6 +682,7 @@ class SubscriptionService {
     user.activePackageId = packageId;
     user.subscriptionExpiresAt = now + days * 24 * 60 * 60 * 1000;
     this.saveSubscriptions();
+    this.persistAdminMutationToDb(user);
     return true;
   }
 
@@ -556,6 +693,7 @@ class SubscriptionService {
     user.status = 'TRIAL_ACTIVE';
     user.freeTrialExpiresAt = Math.max(Date.now(), user.freeTrialExpiresAt) + hours * 60 * 60 * 1000;
     this.saveSubscriptions();
+    this.persistAdminMutationToDb(user);
     return true;
   }
 
@@ -572,6 +710,7 @@ class SubscriptionService {
     user.activePackageId = packageId;
     user.subscriptionExpiresAt = now + durationDays * 24 * 60 * 60 * 1000;
     this.saveSubscriptions();
+    this.persistAdminMutationToDb(user);
     return true;
   }
 
@@ -584,6 +723,7 @@ class SubscriptionService {
     user.subscriptionExpiresAt = Date.now() - 1000;
     user.freeTrialExpiresAt = Date.now() - 1000;
     this.saveSubscriptions();
+    this.persistAdminMutationToDb(user);
     return true;
   }
 
