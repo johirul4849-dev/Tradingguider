@@ -14,6 +14,12 @@ function resolveSymbolConfig(rawSymbol: string): MarketSymbolConfig {
   return BRAND_CONFIG.markets['BTC/USD'];
 }
 
+const YAHOO_HEADERS = {
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  Accept: 'application/json,text/plain,*/*',
+};
+
 export default async function handler(req: any, res: any) {
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -39,7 +45,9 @@ export default async function handler(req: any, res: any) {
     high24h: number,
     low24h: number,
     change24hPct: number,
-    volume24h: number
+    volume24h: number,
+    isLive: boolean,
+    source: string
   ) => {
     const p = Number(price.toFixed(metaConfig.decimals));
     return res.status(200).json({
@@ -51,6 +59,8 @@ export default async function handler(req: any, res: any) {
       low24h: Number(low24h.toFixed(metaConfig.decimals)),
       change24hPct: Number(change24hPct.toFixed(2)),
       volume24h,
+      isLive,
+      source,
       marketOpen: session.isOpen,
       marketStatusLabel: session.statusLabel,
       countdownText: session.countdownText,
@@ -73,7 +83,9 @@ export default async function handler(req: any, res: any) {
               parseFloat(bd.highPrice) || p * 1.02,
               parseFloat(bd.lowPrice) || p * 0.98,
               parseFloat(bd.priceChangePercent) || 0,
-              parseFloat(bd.volume) || 45000
+              parseFloat(bd.volume) || 45000,
+              true,
+              'BINANCE VISION BTC/USD'
             );
           }
         }
@@ -85,39 +97,73 @@ export default async function handler(req: any, res: any) {
           const cd = await cr.json();
           const p = parseFloat(cd?.data?.amount);
           if (p > 0) {
-            return respond(p, p * 1.015, p * 0.985, 0.85, 24000);
+            return respond(p, p * 1.015, p * 0.985, 0.85, 24000, true, 'COINBASE BTC/USD');
           }
         }
       } catch (_e) {}
     }
 
-    // Try Yahoo Finance for all Forex pairs, XAG/USD, XAU/USD (and BTC fallback)
-    try {
-      const yr = await fetch(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(metaConfig.yahooSymbol)}?interval=5m&range=1d`,
-        { headers: { 'User-Agent': 'Mozilla/5.0' } }
-      );
-      if (yr.ok) {
-        const yd: any = await yr.json();
-        const result = yd?.chart?.result?.[0];
-        const yMeta = result?.meta;
-        const closes: number[] = (result?.indicators?.quote?.[0]?.close || []).filter(
-          (v: any) => typeof v === 'number' && isFinite(v) && v > 0
+    // Try Yahoo Finance query2 & query1 for all Forex pairs, XAG/USD, XAU/USD (and BTC fallback)
+    for (const host of ['query2.finance.yahoo.com', 'query1.finance.yahoo.com']) {
+      try {
+        const yr = await fetch(
+          `https://${host}/v8/finance/chart/${encodeURIComponent(metaConfig.yahooSymbol)}?interval=1m&range=1d`,
+          { headers: YAHOO_HEADERS }
         );
-        const rawPrice = Number(yMeta?.regularMarketPrice || closes[closes.length - 1] || 0);
-        if (rawPrice > 0) {
-          const prevClose = Number(yMeta?.chartPreviousClose || closes[0] || rawPrice);
-          const changePct = prevClose > 0 ? ((rawPrice - prevClose) / prevClose) * 100 : 0;
-          return respond(
-            rawPrice,
-            Number(yMeta?.regularMarketDayHigh || rawPrice * 1.004),
-            Number(yMeta?.regularMarketDayLow || rawPrice * 0.996),
-            changePct,
-            Number(yMeta?.regularMarketVolume || 16500)
+        if (yr.ok) {
+          const yd: any = await yr.json();
+          const result = yd?.chart?.result?.[0];
+          const yMeta = result?.meta;
+          const closes: number[] = (result?.indicators?.quote?.[0]?.close || []).filter(
+            (v: any) => typeof v === 'number' && isFinite(v) && v > 0
           );
+          const latestBarClose = closes.length ? closes[closes.length - 1] : 0;
+          const metaPrice = Number(yMeta?.regularMarketPrice || 0);
+          const rawPrice =
+            latestBarClose > 0 && (metaPrice <= 0 || Math.abs(latestBarClose - metaPrice) / metaPrice < 0.02)
+              ? latestBarClose
+              : metaPrice;
+          if (rawPrice > 0) {
+            const prevClose = Number(yMeta?.chartPreviousClose || closes[0] || rawPrice);
+            const changePct = prevClose > 0 ? ((rawPrice - prevClose) / prevClose) * 100 : 0;
+            return respond(
+              rawPrice,
+              Number(yMeta?.regularMarketDayHigh || rawPrice * 1.004),
+              Number(yMeta?.regularMarketDayLow || rawPrice * 0.996),
+              changePct,
+              Number(yMeta?.regularMarketVolume || 16500),
+              true,
+              `YAHOO LIVE (${metaConfig.yahooSymbol})`
+            );
+          }
         }
-      }
-    } catch (_e) {}
+      } catch (_e) {}
+    }
+
+    if (metaConfig.category === 'Forex Major' || metaConfig.category === 'Forex Cross') {
+      try {
+        const er = await fetch('https://open.er-api.com/v6/latest/USD');
+        if (er.ok) {
+          const ej: any = await er.json();
+          const [base, quote] = symbol.split('/');
+          const rates = ej?.rates || {};
+          const uBase = base === 'USD' ? 1 : rates[base];
+          const uQuote = quote === 'USD' ? 1 : rates[quote];
+          if (uBase > 0 && uQuote > 0) {
+            const p = uQuote / uBase;
+            return respond(
+              p,
+              p + metaConfig.defaultBracketDistance,
+              p - metaConfig.defaultBracketDistance,
+              0.08,
+              14000,
+              true,
+              `OPEN-ER FX CROSS (${symbol})`
+            );
+          }
+        }
+      } catch (_e) {}
+    }
 
     if (symbol === 'XAU/USD') {
       try {
@@ -125,7 +171,7 @@ export default async function handler(req: any, res: any) {
         if (gr.ok) {
           const gd: any = await gr.json();
           if (gd && gd.price > 0) {
-            return respond(gd.price, gd.price * 1.01, gd.price * 0.99, 0.45, 18500);
+            return respond(gd.price, gd.price * 1.01, gd.price * 0.99, 0.45, 18500, true, 'GOLD-API LIVE SPOT');
           }
         }
       } catch (_e) {}
@@ -136,7 +182,9 @@ export default async function handler(req: any, res: any) {
       metaConfig.defaultPrice + metaConfig.defaultBracketDistance,
       metaConfig.defaultPrice - metaConfig.defaultBracketDistance,
       0,
-      10000
+      10000,
+      false,
+      'CALIBRATED BASELINE'
     );
   } catch (err: any) {
     return res.status(500).json({ error: err.message });

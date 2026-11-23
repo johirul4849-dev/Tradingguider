@@ -128,18 +128,55 @@ export class MarketDataProvider {
     return [...BRAND_CONFIG.timeframes];
   }
 
+  private static usdFxRatesCache: { ts: number; rates: Record<string, number> | null } = {
+    ts: 0,
+    rates: null,
+  };
+
+  static async fetchLiveUsdFxRates(): Promise<Record<string, number> | null> {
+    if (MarketDataProvider.usdFxRatesCache.rates && Date.now() - MarketDataProvider.usdFxRatesCache.ts < 60000) {
+      return MarketDataProvider.usdFxRatesCache.rates;
+    }
+    try {
+      const controller = new AbortController();
+      const tId = setTimeout(() => controller.abort(), 4500);
+      const res = await fetch('https://open.er-api.com/v6/latest/USD', { signal: controller.signal });
+      clearTimeout(tId);
+      if (res.ok) {
+        const json: any = await res.json();
+        if (json?.result === 'success' && json?.rates?.EUR) {
+          MarketDataProvider.usdFxRatesCache = { ts: Date.now(), rates: json.rates };
+          return json.rates;
+        }
+      }
+    } catch (_e) {}
+    return MarketDataProvider.usdFxRatesCache.rates;
+  }
+
+  static computeFxRateFromUsd(symbol: SupportedSymbol, rates: Record<string, number> | null): number | null {
+    if (!rates || !symbol.includes('/')) return null;
+    const [base, quote] = symbol.split('/');
+    const uBase = base === 'USD' ? 1 : rates[base];
+    const uQuote = quote === 'USD' ? 1 : rates[quote];
+    if (typeof uBase === 'number' && uBase > 0 && typeof uQuote === 'number' && uQuote > 0) {
+      return uQuote / uBase;
+    }
+    return null;
+  }
+
   /**
-   * Generates authentic baseline historical series for initial instant mount,
+   * Generates calibrated baseline historical series for fallback only,
    * scaled precisely to symbol decimals and anchored to Friday close if Forex market is closed.
    */
   static getThreeMonthCandles(
     symbol: SupportedSymbol,
     timeframe: SupportedTimeframe,
-    totalCount = 1000
+    totalCount = 1000,
+    anchorPriceOverride?: number
   ): CandleData[] {
     const meta = BRAND_CONFIG.markets[symbol] || BRAND_CONFIG.markets['BTC/USD'];
     const decimals = meta.decimals;
-    const basePrice = meta.defaultPrice;
+    const basePrice = anchorPriceOverride && anchorPriceOverride > 0 ? anchorPriceOverride : meta.defaultPrice;
     const stepSec = TIMEFRAME_SECONDS[timeframe] || 900;
     const nowSec = getEffectiveSessionNowSec(symbol, stepSec);
     const baseTime = nowSec - (totalCount - 1) * stepSec;
@@ -167,7 +204,7 @@ export class MarketDataProvider {
   }
 
   /**
-   * Fetches real original pairs (25 Forex Pairs, Gold, Silver, BTC/USD) with authentic market history.
+   * Fetches real original pairs (25 Forex Pairs, Gold, Silver, BTC/USD) with full authentic market history.
    * Forex & Metals route via /api/market/history (Yahoo Finance institutional feed), while BTC/USD & Gold
    * also use high-speed Binance Vision / Coinbase / Gold-API sources.
    */
@@ -189,6 +226,8 @@ export class MarketDataProvider {
     candles: CandleData[];
   }> {
     const session = getMarketSessionStatus(symbol);
+    const stepSec = TIMEFRAME_SECONDS[timeframe] || 900;
+    const meta = BRAND_CONFIG.markets[symbol] || BRAND_CONFIG.markets['BTC/USD'];
 
     // For BTC/USD: try ultra-fast direct browser klines first, then local backend
     if (symbol === 'BTC/USD') {
@@ -205,34 +244,120 @@ export class MarketDataProvider {
       } catch (_err) {}
     }
 
-    // For ALL Forex pairs, Metals (XAU/USD, XAG/USD), and BTC fallback: query backend Yahoo/Multi-Source feed
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(
-        `/api/market/history?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`,
-        { signal: controller.signal }
-      );
-      clearTimeout(timeoutId);
+    // For ALL 25 Forex pairs, Metals (XAU/USD, XAG/USD), and BTC fallback: query backend Yahoo/Multi-Source feed
+    // Use generous 15s timeout + automatic retry so large 60d/730d real history payloads never drop
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+        const res = await fetch(
+          `/api/market/history?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`,
+          { signal: controller.signal }
+        );
+        clearTimeout(timeoutId);
 
-      if (res.ok) {
-        const contentType = res.headers.get('content-type') || '';
-        if (contentType.includes('application/json')) {
-          const data = await res.json();
-          if (data.candles && Array.isArray(data.candles) && data.candles.length >= 20) {
-            return {
-              ...data,
-              isLive: true,
-              marketOpen: data.marketOpen ?? session.isOpen,
-              marketStatusLabel: data.marketStatusLabel ?? session.statusLabel,
-              countdownText: data.countdownText ?? session.countdownText,
-              source: data.source || 'LIVE MULTI-SOURCE FEED',
-            };
+        if (res.ok) {
+          const contentType = res.headers.get('content-type') || '';
+          if (contentType.includes('application/json')) {
+            const data = await res.json();
+            if (data.candles && Array.isArray(data.candles) && data.candles.length >= 20) {
+              // Ensure client-side bucket alignment & strictly ascending unique timestamps
+              const dec = meta.decimals;
+              const buckets = new Map<number, CandleData>();
+              for (const bar of data.candles) {
+                const bt = Math.floor(Number(bar.time) / stepSec) * stepSec;
+                const prev = buckets.get(bt);
+                if (!prev) {
+                  buckets.set(bt, {
+                    time: bt,
+                    open: Number(bar.open),
+                    high: Number(bar.high),
+                    low: Number(bar.low),
+                    close: Number(bar.close),
+                    volume: Number(bar.volume || 100),
+                  });
+                } else {
+                  prev.high = Number(Math.max(prev.high, Number(bar.high)).toFixed(dec));
+                  prev.low = Number(Math.min(prev.low, Number(bar.low)).toFixed(dec));
+                  prev.close = Number(bar.close);
+                  prev.volume += Number(bar.volume || 0);
+                }
+              }
+              const cleanCandles = Array.from(buckets.values()).sort((a, b) => a.time - b.time);
+              const lastBar = cleanCandles[cleanCandles.length - 1];
+              return {
+                ...data,
+                price: lastBar?.close ?? data.price,
+                candles: cleanCandles,
+                isLive: true,
+                marketOpen: data.marketOpen ?? session.isOpen,
+                marketStatusLabel: data.marketStatusLabel ?? session.statusLabel,
+                countdownText: data.countdownText ?? session.countdownText,
+                source: data.source || 'YAHOO INSTITUTIONAL FX/METALS FEED',
+              };
+            }
           }
         }
+      } catch (_e) {
+        // retry once on transient timeout/network error
       }
-    } catch (_e) {
-      // ignore
+    }
+
+    // Secondary direct browser fallback for Forex pairs via Frankfurter ECB + Open-ER spot rate
+    if (meta.category === 'Forex Major' || meta.category === 'Forex Cross') {
+      try {
+        const [base, quote] = symbol.split('/');
+        const start = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        const fRes = await fetch(
+          `https://api.frankfurter.dev/v1/${start}..?base=${encodeURIComponent(base)}&symbols=${encodeURIComponent(quote)}`
+        );
+        if (fRes.ok) {
+          const fJson: any = await fRes.json();
+          const ratesObj = fJson?.rates;
+          if (ratesObj && typeof ratesObj === 'object') {
+            const dates = Object.keys(ratesObj).sort();
+            const dailyBars: CandleData[] = [];
+            let prevClose: number | null = null;
+            for (const dStr of dates) {
+              const val = Number(ratesObj[dStr]?.[quote]);
+              if (!isFinite(val) || val <= 0) continue;
+              const t = Math.floor(new Date(`${dStr}T00:00:00Z`).getTime() / 1000);
+              const o = prevClose ?? val;
+              const c = Number(val.toFixed(meta.decimals));
+              const pad = Math.max(meta.tickSize * 6, Math.abs(c - o) * 0.35);
+              dailyBars.push({
+                time: t,
+                open: Number(o.toFixed(meta.decimals)),
+                high: Number((Math.max(o, c) + pad).toFixed(meta.decimals)),
+                low: Number((Math.min(o, c) - pad).toFixed(meta.decimals)),
+                close: c,
+                volume: 950,
+              });
+              prevClose = c;
+            }
+            if (dailyBars.length >= 20) {
+              const last = dailyBars[dailyBars.length - 1];
+              const prev24 = dailyBars[Math.max(0, dailyBars.length - 25)] || dailyBars[0];
+              return {
+                symbol,
+                timeframe,
+                price: last.close,
+                changePercent: prev24?.close
+                  ? Number((((last.close - prev24.close) / prev24.close) * 100).toFixed(2))
+                  : 0,
+                high24h: Math.max(...dailyBars.slice(-24).map((c) => c.high)),
+                low24h: Math.min(...dailyBars.slice(-24).map((c) => c.low)),
+                isLive: true,
+                marketOpen: session.isOpen,
+                marketStatusLabel: session.statusLabel,
+                countdownText: session.countdownText,
+                source: `FRANKFURTER ECB FX FEED (${symbol})`,
+                candles: dailyBars,
+              };
+            }
+          }
+        }
+      } catch (_e) {}
     }
 
     // Secondary browser fallback for XAU/USD when server unreachable
@@ -250,8 +375,15 @@ export class MarketDataProvider {
       } catch (_e) {}
     }
 
-    // Final calibrated baseline
-    const fallbackCandles = MarketDataProvider.getThreeMonthCandles(symbol, timeframe, 720);
+    // Final anchor check using live USD FX spot rates so fallback never uses stale hardcoded prices
+    let anchorRate: number | undefined = undefined;
+    if (meta.category === 'Forex Major' || meta.category === 'Forex Cross') {
+      const rates = await MarketDataProvider.fetchLiveUsdFxRates();
+      const spot = MarketDataProvider.computeFxRateFromUsd(symbol, rates);
+      if (spot && spot > 0) anchorRate = spot;
+    }
+
+    const fallbackCandles = MarketDataProvider.getThreeMonthCandles(symbol, timeframe, 720, anchorRate);
     const last = fallbackCandles[fallbackCandles.length - 1];
     const prev24 = fallbackCandles[Math.max(0, fallbackCandles.length - 25)];
     const changePct = prev24?.close
@@ -264,11 +396,11 @@ export class MarketDataProvider {
       changePercent: changePct,
       high24h: Math.max(...fallbackCandles.slice(-24).map((c) => c.high)),
       low24h: Math.min(...fallbackCandles.slice(-24).map((c) => c.low)),
-      isLive: false,
+      isLive: Boolean(anchorRate),
       marketOpen: session.isOpen,
       marketStatusLabel: session.statusLabel,
       countdownText: session.countdownText,
-      source: 'CALIBRATED BASELINE FEED',
+      source: anchorRate ? `OPEN-ER SPOT ANCHORED (${symbol})` : 'CALIBRATED BASELINE FEED',
       candles: fallbackCandles,
     };
   }

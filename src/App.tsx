@@ -31,7 +31,7 @@ const INITIAL_DEMO_PROFILE: UserProfileData = {
   displayName: 'Pro Backtester',
   email: 'demo@tradepilot.ai',
   photoURL: '',
-  preferredMarket: 'BTC/USD',
+  preferredMarket: 'EUR/USD',
   preferredTimeframe: '15m',
   experienceLevel: 'Intermediate',
   mainGoal: 'Improve risk management',

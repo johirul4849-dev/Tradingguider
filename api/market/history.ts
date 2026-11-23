@@ -14,6 +14,22 @@ function resolveSymbolConfig(rawSymbol: string): MarketSymbolConfig {
   return BRAND_CONFIG.markets['BTC/USD'];
 }
 
+const TIMEFRAME_SEC_MAP: Record<string, number> = {
+  '1m': 60,
+  '5m': 300,
+  '15m': 900,
+  '30m': 1800,
+  '1H': 3600,
+  '4H': 14400,
+  '1D': 86400,
+};
+
+const YAHOO_HEADERS = {
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  Accept: 'application/json,text/plain,*/*',
+};
+
 export default async function handler(req: any, res: any) {
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -33,33 +49,62 @@ export default async function handler(req: any, res: any) {
   const metaConfig = resolveSymbolConfig(rawSymbol);
   const symbol = metaConfig.id;
   const session = getMarketSessionStatus(symbol);
+  const stepSec = TIMEFRAME_SEC_MAP[timeframe] || 900;
 
   if (symbol !== 'BTC/USD') {
-    const yahooTfMap: Record<string, { interval: string; range: string }> = {
-      '1m': { interval: '1m', range: '7d' },
-      '5m': { interval: '5m', range: '1mo' },
-      '15m': { interval: '15m', range: '1mo' },
-      '30m': { interval: '30m', range: '1mo' },
-      '1H': { interval: '1h', range: '3mo' },
-      '4H': { interval: '1h', range: '3mo' },
-      '1D': { interval: '1d', range: '1y' },
+    const yahooTfMap: Record<string, Array<{ interval: string; range: string }>> = {
+      '1m': [
+        { interval: '1m', range: '8d' },
+        { interval: '1m', range: '5d' },
+      ],
+      '5m': [
+        { interval: '5m', range: '60d' },
+        { interval: '5m', range: '1mo' },
+      ],
+      '15m': [
+        { interval: '15m', range: '60d' },
+        { interval: '15m', range: '1mo' },
+      ],
+      '30m': [
+        { interval: '30m', range: '60d' },
+        { interval: '30m', range: '1mo' },
+      ],
+      '1H': [
+        { interval: '1h', range: '730d' },
+        { interval: '1h', range: '3mo' },
+      ],
+      '4H': [
+        { interval: '1h', range: '730d' },
+        { interval: '1h', range: '3mo' },
+      ],
+      '1D': [
+        { interval: '1d', range: '5y' },
+        { interval: '1d', range: '1y' },
+      ],
     };
-    const cfg = yahooTfMap[timeframe] || yahooTfMap['15m'];
-    try {
-      const yRes = await fetch(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
-          metaConfig.yahooSymbol
-        )}?interval=${cfg.interval}&range=${cfg.range}`,
-        { headers: { 'User-Agent': 'Mozilla/5.0' } }
-      );
-      if (yRes.ok) {
-        const yJson: any = await yRes.json();
-        const result = yJson?.chart?.result?.[0];
-        const timestamps: any[] = result?.timestamp || [];
-        const quote = result?.indicators?.quote?.[0];
-        if (Array.isArray(timestamps) && quote) {
+    const candidates = yahooTfMap[timeframe] || yahooTfMap['15m'];
+    for (const cfg of candidates) {
+      for (const host of ['query2.finance.yahoo.com', 'query1.finance.yahoo.com']) {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 8500);
+          const yRes = await fetch(
+            `https://${host}/v8/finance/chart/${encodeURIComponent(
+              metaConfig.yahooSymbol
+            )}?interval=${cfg.interval}&range=${cfg.range}`,
+            { headers: YAHOO_HEADERS, signal: controller.signal }
+          );
+          clearTimeout(timeout);
+          if (!yRes.ok) continue;
+
+          const yJson: any = await yRes.json();
+          const result = yJson?.chart?.result?.[0];
+          const timestamps: any[] = result?.timestamp || [];
+          const quote = result?.indicators?.quote?.[0];
+          if (!Array.isArray(timestamps) || !quote || timestamps.length < 5) continue;
+
           const dec = metaConfig.decimals;
-          let candles: Array<{ time: number; open: number; high: number; low: number; close: number; volume: number }> = [];
+          const rawBars: Array<{ time: number; open: number; high: number; low: number; close: number; volume: number }> = [];
           for (let i = 0; i < timestamps.length; i++) {
             const t = Number(timestamps[i]);
             const o = Number(quote.open?.[i]);
@@ -70,7 +115,7 @@ export default async function handler(req: any, res: any) {
               continue;
             }
             const rawVol = Number(quote.volume?.[i]);
-            candles.push({
+            rawBars.push({
               time: Math.floor(t),
               open: Number(o.toFixed(dec)),
               high: Number(Math.max(o, h, c).toFixed(dec)),
@@ -79,26 +124,24 @@ export default async function handler(req: any, res: any) {
               volume: isFinite(rawVol) && rawVol > 0 ? Math.round(rawVol) : 500,
             });
           }
-          candles.sort((a, b) => a.time - b.time);
+          rawBars.sort((a, b) => a.time - b.time);
 
-          if (timeframe === '4H') {
-            const buckets = new Map<number, (typeof candles)[number]>();
-            for (const bar of candles) {
-              const bucketTime = Math.floor(bar.time / 14400) * 14400;
-              const prev = buckets.get(bucketTime);
-              if (!prev) {
-                buckets.set(bucketTime, { ...bar, time: bucketTime });
-              } else {
-                prev.high = Number(Math.max(prev.high, bar.high).toFixed(dec));
-                prev.low = Number(Math.min(prev.low, bar.low).toFixed(dec));
-                prev.close = bar.close;
-                prev.volume += bar.volume;
-              }
+          const buckets = new Map<number, (typeof rawBars)[number]>();
+          for (const bar of rawBars) {
+            const bucketTime = Math.floor(bar.time / stepSec) * stepSec;
+            const prev = buckets.get(bucketTime);
+            if (!prev) {
+              buckets.set(bucketTime, { ...bar, time: bucketTime });
+            } else {
+              prev.high = Number(Math.max(prev.high, bar.high).toFixed(dec));
+              prev.low = Number(Math.min(prev.low, bar.low).toFixed(dec));
+              prev.close = bar.close;
+              prev.volume += bar.volume;
             }
-            candles = Array.from(buckets.values()).sort((a, b) => a.time - b.time);
           }
+          const candles = Array.from(buckets.values()).sort((a, b) => a.time - b.time);
 
-          if (candles.length > 20) {
+          if (candles.length >= 20) {
             const last = candles[candles.length - 1];
             const prev24 = candles[Math.max(0, candles.length - 25)] || candles[0];
             const changePct = prev24?.close
@@ -121,9 +164,9 @@ export default async function handler(req: any, res: any) {
               candles,
             });
           }
-        }
+        } catch (_e) {}
       }
-    } catch (_e) {}
+    }
   }
 
   const tfMap: Record<string, string> = {
@@ -138,14 +181,14 @@ export default async function handler(req: any, res: any) {
   const binanceInterval = tfMap[timeframe] || '15m';
   const binancePair = symbol === 'XAU/USD' ? 'PAXGUSDT' : 'BTCUSDT';
 
-  for (const url of [
-    `https://data-api.binance.vision/api/v3/klines?symbol=${binancePair}&interval=${binanceInterval}&limit=1000`,
-    `https://api.binance.com/api/v3/klines?symbol=${binancePair}&interval=${binanceInterval}&limit=1000`,
-  ]) {
+  for (const host of ['https://data-api.binance.vision', 'https://api.binance.com']) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3500);
-      const bRes = await fetch(url, { signal: controller.signal });
+      const timeout = setTimeout(() => controller.abort(), 4500);
+      const bRes = await fetch(
+        `${host}/api/v3/klines?symbol=${binancePair}&interval=${binanceInterval}&limit=1000`,
+        { signal: controller.signal }
+      );
       clearTimeout(timeout);
       if (bRes.ok) {
         const raw: any[] = await bRes.json();

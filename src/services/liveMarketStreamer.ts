@@ -5,7 +5,7 @@ import {
   SupportedSymbol,
   SupportedTimeframe,
 } from '../config/brand';
-import { CandleData, TIMEFRAME_SECONDS } from './marketEngine';
+import { CandleData, MarketDataProvider, TIMEFRAME_SECONDS } from './marketEngine';
 
 export interface LiveMarketTick {
   symbol: SupportedSymbol;
@@ -63,7 +63,7 @@ function buildInitialTicks(): Record<SupportedSymbol, LiveMarketTick> {
 class LiveMarketStreamerService {
   private ws: WebSocket | null = null;
   private sse: EventSource | null = null;
-  private currentSymbol: SupportedSymbol = 'BTC/USD';
+  private currentSymbol: SupportedSymbol = 'EUR/USD';
   private currentTimeframe: SupportedTimeframe = '15m';
   private tickListeners: Set<TickListener> = new Set();
   private statusListeners: Set<StatusListener> = new Set();
@@ -73,6 +73,7 @@ class LiveMarketStreamerService {
   private sessionWatchTimer: any = null;
   private lastTickTime = 0;
   private lastObservedMarketOpen = true;
+  private realTickReceived = new Set<SupportedSymbol>();
 
   // Cached latest ticks for all 28 supported symbols
   private latestTicks: Record<SupportedSymbol, LiveMarketTick> = buildInitialTicks();
@@ -80,15 +81,49 @@ class LiveMarketStreamerService {
   constructor() {
     this.lastObservedMarketOpen = getMarketSessionStatus(this.currentSymbol).isOpen;
     this.fetchInstantTicker(this.currentSymbol);
+    this.prefetchAllFxTicks();
     this.connect();
     this.startFallbackPolling();
     this.startSessionWatcher();
   }
 
+  public async prefetchAllFxTicks() {
+    try {
+      const rates = await MarketDataProvider.fetchLiveUsdFxRates();
+      if (!rates) return;
+      const nowMs = Date.now();
+      ALL_SUPPORTED_SYMBOLS.forEach((sym) => {
+        const meta = BRAND_CONFIG.markets[sym];
+        if (meta.category !== 'Forex Major' && meta.category !== 'Forex Cross') return;
+        // Skip overwriting if we already received a fresher Yahoo/SSE tick within 15s
+        const existing = this.latestTicks[sym];
+        if (this.realTickReceived.has(sym) && existing && nowMs - existing.timestamp < 15000) return;
+
+        const cross = MarketDataProvider.computeFxRateFromUsd(sym, rates);
+        if (cross && cross > 0) {
+          const p = Number(cross.toFixed(meta.decimals));
+          const halfSpread = meta.typicalSpread / 2;
+          const session = getMarketSessionStatus(sym, nowMs);
+          this.latestTicks[sym] = {
+            ...existing,
+            symbol: sym,
+            price: p,
+            bid: Number((p - halfSpread).toFixed(meta.decimals)),
+            ask: Number((p + halfSpread).toFixed(meta.decimals)),
+            high24h: Number((p + meta.defaultBracketDistance).toFixed(meta.decimals)),
+            low24h: Number((p - meta.defaultBracketDistance).toFixed(meta.decimals)),
+            marketOpen: session.isOpen,
+            timestamp: nowMs,
+          };
+        }
+      });
+    } catch (_e) {}
+  }
+
   public subscribeTicks(listener: TickListener) {
     this.tickListeners.add(listener);
     const cached = this.latestTicks[this.currentSymbol];
-    if (cached) {
+    if (cached && this.realTickReceived.has(this.currentSymbol)) {
       listener(cached);
     }
     return () => {
@@ -124,9 +159,9 @@ class LiveMarketStreamerService {
     this.currentTimeframe = timeframe;
     this.lastObservedMarketOpen = getMarketSessionStatus(symbol).isOpen;
 
-    // Immediately push cached tick so UI never flickers
+    // Immediately push cached tick if it holds real data
     const tick = this.latestTicks[symbol];
-    if (tick) {
+    if (tick && this.realTickReceived.has(symbol)) {
       this.tickListeners.forEach((fn) =>
         fn({
           ...tick,
@@ -214,7 +249,7 @@ class LiveMarketStreamerService {
     // 2. For all Forex pairs, Silver (XAG/USD), and Gold (XAU/USD): query backend Yahoo/Multi-source ticker
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2500);
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
       const r = await fetch(`/api/market/ticker?symbol=${encodeURIComponent(sym)}`, {
         signal: controller.signal,
       });
@@ -237,7 +272,29 @@ class LiveMarketStreamerService {
       }
     } catch (_e) {}
 
-    // 3. Direct Gold fallback if backend unreachable
+    // 3. Direct FX cross-rate fallback in browser if backend unreachable
+    const meta = BRAND_CONFIG.markets[sym];
+    if (meta && (meta.category === 'Forex Major' || meta.category === 'Forex Cross')) {
+      try {
+        const rates = await MarketDataProvider.fetchLiveUsdFxRates();
+        const cross = MarketDataProvider.computeFxRateFromUsd(sym, rates);
+        if (cross && cross > 0) {
+          this.applyTickUpdate(
+            sym,
+            cross,
+            cross + meta.defaultBracketDistance,
+            cross - meta.defaultBracketDistance,
+            0.05,
+            14000,
+            session.isOpen
+          );
+          this.setStatus('CONNECTED');
+          return;
+        }
+      } catch (_e) {}
+    }
+
+    // 4. Direct Gold fallback if backend unreachable
     if (sym === 'XAU/USD') {
       try {
         const gr = await fetch('https://api.gold-api.com/price/XAU');
@@ -369,6 +426,9 @@ class LiveMarketStreamerService {
   ) {
     if (price <= 0) return;
     this.lastTickTime = Date.now();
+    const hadRealTick = this.realTickReceived.has(sym);
+    this.realTickReceived.add(sym);
+
     const meta = BRAND_CONFIG.markets[sym] || BRAND_CONFIG.markets['BTC/USD'];
     const dec = meta.decimals;
     const halfSpread = meta.typicalSpread / 2;
@@ -381,8 +441,16 @@ class LiveMarketStreamerService {
     const candlePeriodTime = Math.floor(nowSec / stepSec) * stepSec;
 
     let candle: CandleData;
-    if (!isMarketOpen && existing?.candle) {
-      // Frozen session: preserve exact close candle without creating phantom weekend bars
+    if (!hadRealTick) {
+      candle = {
+        time: candlePeriodTime,
+        open: roundedPrice,
+        high: roundedPrice,
+        low: roundedPrice,
+        close: roundedPrice,
+        volume: 1,
+      };
+    } else if (!isMarketOpen && existing?.candle) {
       candle = {
         ...existing.candle,
         close: roundedPrice,

@@ -590,11 +590,19 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     syncPriceLineCoordinates();
   }, [syncPriceLineCoordinates]);
 
-  // Reset / Fit Content Zoom Function
+  // Reset / Fit Content Zoom Function (focus cleanly on latest ~120 bars so candles are crisp; full history remains scrollable left)
   const handleResetZoom = useCallback(() => {
     if (!chartRef.current) return;
-    chartRef.current.timeScale().applyOptions({ barSpacing: 12 });
-    chartRef.current.timeScale().fitContent();
+    const total = candlesRef.current.length;
+    chartRef.current.timeScale().applyOptions({ barSpacing: 10 });
+    if (total > 0) {
+      chartRef.current.timeScale().setVisibleLogicalRange({
+        from: Math.max(0, total - 115),
+        to: total + 6,
+      });
+    } else {
+      chartRef.current.timeScale().fitContent();
+    }
     chartRef.current.priceScale('right').applyOptions({ autoScale: true });
     syncPriceLineCoordinates();
   }, [syncPriceLineCoordinates]);
@@ -802,8 +810,16 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       series.setData(candles.map((c) => ({ time: c.time as UTCTimestamp, value: c.close })));
     }
 
-    // When a brand new candle forms (candles count increases), automatically scroll time scale to live candle
-    if (candles.length > prevCandlesCountRef.current && prevCandlesCountRef.current > 0) {
+    // When a brand new candle forms (1-2 bars added), scroll smoothly to real-time tip.
+    // When full historical dataset loads or symbol/timeframe swaps (size delta > 10), focus on latest ~115 bars.
+    const prevLen = prevCandlesCountRef.current;
+    if (Math.abs(candles.length - prevLen) > 10) {
+      chart.timeScale().applyOptions({ barSpacing: 10 });
+      chart.timeScale().setVisibleLogicalRange({
+        from: Math.max(0, candles.length - 115),
+        to: candles.length + 6,
+      });
+    } else if (candles.length > prevLen && prevLen > 0) {
       try {
         chart.timeScale().scrollToRealTime();
       } catch (_e) {}
@@ -889,22 +905,29 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     requestAnimationFrame(syncPriceLineCoordinates);
   }, [candles, indicators, chartType, symbol, syncPriceLineCoordinates]);
 
-  // Handle pair (symbol) switch cleanly so charts never disappear or get stuck off-scale
+  // Handle pair (symbol) or timeframe switch cleanly without squishing thousands of bars via fitContent()
   const prevSymbolRef = useRef<SupportedSymbol>(symbol);
+  const prevTimeframeRef = useRef<SupportedTimeframe>(timeframe);
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
-    if (prevSymbolRef.current !== symbol) {
+    if (prevSymbolRef.current !== symbol || prevTimeframeRef.current !== timeframe) {
       prevSymbolRef.current = symbol;
+      prevTimeframeRef.current = timeframe;
+      const total = candlesRef.current.length;
       chart.priceScale('right').applyOptions({ autoScale: true });
-      chart.timeScale().resetTimeScale();
-      chart.timeScale().fitContent();
+      chart.timeScale().applyOptions({ barSpacing: 10 });
+      if (total > 0) {
+        chart.timeScale().setVisibleLogicalRange({
+          from: Math.max(0, total - 115),
+          to: total + 6,
+        });
+      }
       requestAnimationFrame(() => {
-        chart.timeScale().scrollToPosition(6, false);
         syncPriceLineCoordinates();
       });
     }
-  }, [symbol, syncPriceLineCoordinates]);
+  }, [symbol, timeframe, syncPriceLineCoordinates]);
 
   // Convert Y pixel on chart to Price
   const yToPrice = useCallback(

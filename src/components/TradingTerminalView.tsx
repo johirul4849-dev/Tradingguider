@@ -174,26 +174,21 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
   // Full-Window / Fullscreen Chart State
   const [isFullWindowChart, setIsFullWindowChart] = useState<boolean>(false);
 
-  // Lazy in-memory stable cache for all 28 pairs so switching pairs is instant
-  const pairCandlesCache = useRef<Partial<Record<SupportedSymbol, CandleData[]>>>({
-    [initialSymbol]: MarketDataProvider.getThreeMonthCandles(
-      initialSymbol,
-      profile.preferredTimeframe || '15m',
-      1500
-    ),
-  });
+  // Lazy in-memory cache keyed by `${symbol}_${timeframe}` so switching pairs & timeframes preserves full history
+  const pairCandlesCache = useRef<Record<string, CandleData[]>>({});
+  const realHistoryLoadedKeys = useRef<Set<string>>(new Set());
 
-  // 3-Month Historical + Live Candles
-  const [allCandles, setAllCandles] = useState<CandleData[]>(
-    () => pairCandlesCache.current[initialSymbol]!
+  // Full Historical + Live Candles (seeded briefly until /api/market/history returns full real data)
+  const [allCandles, setAllCandles] = useState<CandleData[]>(() =>
+    MarketDataProvider.getThreeMonthCandles(initialSymbol, profile.preferredTimeframe || '15m', 120)
   );
+  const [isLoadingHistory, setIsLoadingHistory] = useState<boolean>(true);
+  const [historyMeta, setHistoryMeta] = useState<{ count: number; isLive: boolean; source: string } | null>(null);
 
   // TradingView Bar Replay State (Default to FALSE = 100% REAL LIVE MARKET STREAM)
   const [isReplayMode, setIsReplayMode] = useState<boolean>(false);
   const [isReplayCutMode, setIsReplayCutMode] = useState<boolean>(false);
-  const [replayIndex, setReplayIndex] = useState<number>(
-    () => (pairCandlesCache.current[initialSymbol]?.length || 1) - 1
-  );
+  const [replayIndex, setReplayIndex] = useState<number>(119);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [replaySpeed, setReplaySpeed] = useState<number>(1);
 
@@ -234,7 +229,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
   const [strategyLabCategory, setStrategyLabCategory] = useState<string>('ALL');
   const [isScanningNewMethods, setIsScanningNewMethods] = useState<boolean>(false);
   const [discoveredSetups, setDiscoveredSetups] = useState<AiTechniqueSetup[]>(() =>
-    findAiTechniqueSetups(pairCandlesCache.current[initialSymbol]!, initialSymbol, '15m')
+    findAiTechniqueSetups(allCandles, initialSymbol, profile.preferredTimeframe || '15m')
   );
 
   // AI Smart Live Prediction Scanner & 10-Second Auto-Execution
@@ -384,59 +379,44 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
     showToast('Draft order cancelled.', 'blue');
   };
 
-  // Active Symbol ref to guard against async fetch race conditions
+  // Active Symbol/Timeframe refs to guard against async fetch race conditions
   const activeSymbolRef = useRef<SupportedSymbol>(symbol);
   activeSymbolRef.current = symbol;
+  const activeTimeframeRef = useRef<SupportedTimeframe>(timeframe);
+  activeTimeframeRef.current = timeframe;
 
-  // Switch Pair Safely Without Disappearing / Flickering
+  // Switch Pair Safely Without Disappearing / Flickering (Single fetch runs in useEffect([symbol, timeframe]))
   const handleSelectSymbol = (newSymbol: SupportedSymbol) => {
-    if (newSymbol === symbol) return;
+    if (newSymbol === symbol) {
+      setShowPairSelectorModal(false);
+      return;
+    }
+    const cacheKey = `${newSymbol}_${timeframe}`;
+    const cached = pairCandlesCache.current[cacheKey];
+    const seedCandles = cached || MarketDataProvider.getThreeMonthCandles(newSymbol, timeframe, 120);
+
     setSymbol(newSymbol);
     activeSymbolRef.current = newSymbol;
-
-    // Immediately load from pair cache so chart never flashes or disappears
-    const cached = pairCandlesCache.current[newSymbol] || MarketDataProvider.getThreeMonthCandles(newSymbol, timeframe, 1500);
-    setAllCandles(cached);
-    allCandlesRef.current = cached;
-    const startIdx = isReplayMode ? Math.max(100, cached.length - 120) : cached.length - 1;
+    setAllCandles(seedCandles);
+    allCandlesRef.current = seedCandles;
+    const startIdx = isReplayMode ? Math.max(30, seedCandles.length - 120) : seedCandles.length - 1;
     setReplayIndex(startIdx);
     replayIndexRef.current = startIdx;
     setIsPlaying(false);
     setDraftOrder(null);
     setAiAutoMark(null);
     setAiPredictionAlert(null);
-    initDefaultBracket(cached[startIdx].close, tradeDirection, newSymbol);
-
-    // Update Live WebSocket Streamer to the new pair
-    liveMarketStreamer.setSymbolAndTimeframe(newSymbol, timeframe);
-    setDiscoveredSetups(findAiTechniqueSetups(cached, newSymbol, timeframe));
-
-    // Fetch background 3-month history & live feed safely with active symbol guard
-    MarketDataProvider.fetchThreeMonthHistoryAndLive(newSymbol, timeframe).then((res) => {
-      if (res.candles && res.candles.length >= 100) {
-        pairCandlesCache.current[newSymbol] = res.candles;
-        if (activeSymbolRef.current === newSymbol) {
-          setAllCandles(res.candles);
-          allCandlesRef.current = res.candles;
-          if (isReplayMode) {
-            setReplayIndex(Math.max(100, res.candles.length - 120));
-            replayIndexRef.current = Math.max(100, res.candles.length - 120);
-          } else {
-            setReplayIndex(res.candles.length - 1);
-            replayIndexRef.current = res.candles.length - 1;
-          }
-          setDiscoveredSetups(findAiTechniqueSetups(res.candles, newSymbol, timeframe));
-        }
-      }
-    });
+    prevPriceRef.current = 0;
+    initDefaultBracket(seedCandles[startIdx].close, tradeDirection, newSymbol);
+    setDiscoveredSetups(findAiTechniqueSetups(seedCandles, newSymbol, timeframe));
 
     setShowPairSelectorModal(false);
     const nextMeta = BRAND_CONFIG.markets[newSymbol];
     const nextSession = getMarketSessionStatus(newSymbol);
     showToast(
       nextSession.isOpen
-        ? `Switched to ${newSymbol} (${nextMeta.name}) — Live Stream Connected`
-        : `${newSymbol} Market Closed (${nextSession.countdownText}) — Chart Frozen at Last Close`,
+        ? `Loading real history & live stream for ${newSymbol} (${nextMeta.name})...`
+        : `${newSymbol} Market Closed (${nextSession.countdownText}) — Loading last close history...`,
       nextSession.isOpen ? 'emerald' : 'blue'
     );
   };
@@ -468,6 +448,11 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
       }
       prevPriceRef.current = tick.price;
 
+      const cacheKey = `${symbol}_${timeframe}`;
+
+      // Wait until real historical candles are mounted before appending/rolling ticks into chart
+      if (!realHistoryLoadedKeys.current.has(cacheKey)) return;
+
       // If at real-time tip, update the running candle in allCandles
       if (!isReplayModeRef.current || replayIndexRef.current >= allCandlesRef.current.length - 1) {
         setAllCandles((prev) => {
@@ -482,21 +467,34 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
 
           // If current candle period has completed and new candle timeframe period has arrived
           if (last.time < currentPeriodStart) {
-            let nextTime = last.time + stepSec;
-            while (nextTime <= currentPeriodStart && copy.length < 3500) {
-              const prevClose = copy[copy.length - 1].close;
-              const p = nextTime === currentPeriodStart ? tick.price : prevClose;
+            const gapBars = Math.floor((currentPeriodStart - last.time) / stepSec);
+            if (gapBars <= 4) {
+              let nextTime = last.time + stepSec;
+              while (nextTime <= currentPeriodStart && copy.length < 25000) {
+                const prevClose = copy[copy.length - 1].close;
+                const p = nextTime === currentPeriodStart ? tick.price : prevClose;
+                copy.push({
+                  time: nextTime,
+                  open: prevClose,
+                  high: Math.max(prevClose, p),
+                  low: Math.min(prevClose, p),
+                  close: p,
+                  volume: 1,
+                });
+                nextTime += stepSec;
+              }
+            } else {
+              // Preserve market break gaps cleanly without printing hundreds of flat synthetic candles
               copy.push({
-                time: nextTime,
-                open: prevClose,
-                high: Math.max(prevClose, p),
-                low: Math.min(prevClose, p),
-                close: p,
+                time: currentPeriodStart,
+                open: last.close,
+                high: Math.max(last.close, tick.price),
+                low: Math.min(last.close, tick.price),
+                close: tick.price,
                 volume: 1,
               });
-              nextTime += stepSec;
             }
-            pairCandlesCache.current[symbol] = copy;
+            pairCandlesCache.current[cacheKey] = copy;
             allCandlesRef.current = copy;
             if (!isReplayModeRef.current) {
               setReplayIndex(copy.length - 1);
@@ -512,7 +510,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
             low: Math.min(last.low, tick.price),
             volume: last.volume + 1,
           };
-          pairCandlesCache.current[symbol] = copy;
+          pairCandlesCache.current[cacheKey] = copy;
           allCandlesRef.current = copy;
           return copy;
         });
@@ -531,6 +529,9 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
     if (isReplayModeRef.current) return;
     if (!getMarketSessionStatus(symbol).isOpen) return;
 
+    const cacheKey = `${symbol}_${timeframe}`;
+    if (!realHistoryLoadedKeys.current.has(cacheKey)) return;
+
     const stepSec = TIMEFRAME_SECONDS[timeframe] || 900;
     const nowSec = Math.floor(Date.now() / 1000);
     const currentPeriodStart = Math.floor(nowSec / stepSec) * stepSec;
@@ -543,22 +544,34 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
       if (last.time < currentPeriodStart) {
         const copy = [...prev];
         const currentP = prevPriceRef.current > 0 ? prevPriceRef.current : last.close;
-        let nextTime = last.time + stepSec;
+        const gapBars = Math.floor((currentPeriodStart - last.time) / stepSec);
 
-        while (nextTime <= currentPeriodStart && copy.length < 3500) {
-          const prevClose = copy[copy.length - 1].close;
-          const p = nextTime === currentPeriodStart ? currentP : prevClose;
+        if (gapBars <= 4) {
+          let nextTime = last.time + stepSec;
+          while (nextTime <= currentPeriodStart && copy.length < 25000) {
+            const prevClose = copy[copy.length - 1].close;
+            const p = nextTime === currentPeriodStart ? currentP : prevClose;
+            copy.push({
+              time: nextTime,
+              open: prevClose,
+              high: Math.max(prevClose, p),
+              low: Math.min(prevClose, p),
+              close: p,
+              volume: 1,
+            });
+            nextTime += stepSec;
+          }
+        } else {
           copy.push({
-            time: nextTime,
-            open: prevClose,
-            high: Math.max(prevClose, p),
-            low: Math.min(prevClose, p),
-            close: p,
+            time: currentPeriodStart,
+            open: last.close,
+            high: Math.max(last.close, currentP),
+            low: Math.min(last.close, currentP),
+            close: currentP,
             volume: 1,
           });
-          nextTime += stepSec;
         }
-        pairCandlesCache.current[symbol] = copy;
+        pairCandlesCache.current[cacheKey] = copy;
         allCandlesRef.current = copy;
         setReplayIndex(copy.length - 1);
         replayIndexRef.current = copy.length - 1;
@@ -575,12 +588,24 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
     return () => clearInterval(timer);
   }, [checkAndRollNewCandle, isReplayMode]);
 
-  // Initial / Pair-Change Data Fetch on Mount or Symbol/Timeframe Change
+  // Initial / Pair-Change / Timeframe-Change Data Fetch
   useEffect(() => {
     let mounted = true;
+    const cacheKey = `${symbol}_${timeframe}`;
+    const existingCached = pairCandlesCache.current[cacheKey];
+    if (existingCached && existingCached.length > 0 && realHistoryLoadedKeys.current.has(cacheKey)) {
+      setAllCandles(existingCached);
+      allCandlesRef.current = existingCached;
+      setIsLoadingHistory(false);
+    } else {
+      setIsLoadingHistory(true);
+    }
+
     MarketDataProvider.fetchThreeMonthHistoryAndLive(symbol, timeframe).then((res) => {
       if (!mounted) return;
-      if (res.candles && res.candles.length >= 30) {
+      if (activeSymbolRef.current !== symbol || activeTimeframeRef.current !== timeframe) return;
+
+      if (res.candles && res.candles.length >= 20) {
         const stepSec = TIMEFRAME_SECONDS[timeframe] || 900;
         const nowSec = Math.floor(Date.now() / 1000);
         const currentPeriodStart = Math.floor(nowSec / stepSec) * stepSec;
@@ -588,21 +613,34 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
         let workingCandles = [...res.candles];
         const last = workingCandles[workingCandles.length - 1];
 
-        // Only pad to current active candle period if market is currently OPEN
+        // Pad up to 4 bars or create clean current session open bar when market is currently OPEN
         if (getMarketSessionStatus(symbol).isOpen && last && last.time < currentPeriodStart) {
-          let nextTime = last.time + stepSec;
-          while (nextTime <= currentPeriodStart && workingCandles.length < 3500) {
-            const prevClose = workingCandles[workingCandles.length - 1].close;
-            const p = nextTime === currentPeriodStart && res.price > 0 ? res.price : prevClose;
+          const gapBars = Math.floor((currentPeriodStart - last.time) / stepSec);
+          if (gapBars <= 4) {
+            let nextTime = last.time + stepSec;
+            while (nextTime <= currentPeriodStart && workingCandles.length < 25000) {
+              const prevClose = workingCandles[workingCandles.length - 1].close;
+              const p = nextTime === currentPeriodStart && res.price > 0 ? res.price : prevClose;
+              workingCandles.push({
+                time: nextTime,
+                open: prevClose,
+                high: Math.max(prevClose, p),
+                low: Math.min(prevClose, p),
+                close: p,
+                volume: 1,
+              });
+              nextTime += stepSec;
+            }
+          } else {
+            const p = res.price > 0 ? res.price : last.close;
             workingCandles.push({
-              time: nextTime,
-              open: prevClose,
-              high: Math.max(prevClose, p),
-              low: Math.min(prevClose, p),
+              time: currentPeriodStart,
+              open: last.close,
+              high: Math.max(last.close, p),
+              low: Math.min(last.close, p),
               close: p,
               volume: 1,
             });
-            nextTime += stepSec;
           }
         }
 
@@ -610,14 +648,27 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
           prevPriceRef.current = res.price;
         }
 
-        pairCandlesCache.current[symbol] = workingCandles;
+        if (res.isLive) {
+          realHistoryLoadedKeys.current.add(cacheKey);
+        }
+
+        pairCandlesCache.current[cacheKey] = workingCandles;
         setAllCandles(workingCandles);
         allCandlesRef.current = workingCandles;
+        setHistoryMeta({
+          count: workingCandles.length,
+          isLive: res.isLive,
+          source: res.source,
+        });
+        setIsLoadingHistory(false);
+
         const startIdx = isReplayMode ? Math.max(30, workingCandles.length - 120) : workingCandles.length - 1;
         setReplayIndex(startIdx);
         replayIndexRef.current = startIdx;
         initDefaultBracket(workingCandles[startIdx].close, tradeDirection, symbol);
         setDiscoveredSetups(findAiTechniqueSetups(workingCandles, symbol, timeframe));
+      } else {
+        setIsLoadingHistory(false);
       }
     });
 
@@ -637,10 +688,12 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
     if (!wasOpenRef.current && nowOpen) {
       wasOpenRef.current = true;
       liveMarketStreamer.setSymbolAndTimeframe(symbol, timeframe);
+      const cacheKey = `${symbol}_${timeframe}`;
       MarketDataProvider.fetchThreeMonthHistoryAndLive(symbol, timeframe).then((res) => {
-        if (activeSymbolRef.current !== symbol) return;
-        if (res.candles && res.candles.length >= 30) {
-          pairCandlesCache.current[symbol] = res.candles;
+        if (activeSymbolRef.current !== symbol || activeTimeframeRef.current !== timeframe) return;
+        if (res.candles && res.candles.length >= 20) {
+          realHistoryLoadedKeys.current.add(cacheKey);
+          pairCandlesCache.current[cacheKey] = res.candles;
           setAllCandles(res.candles);
           allCandlesRef.current = res.candles;
           if (!isReplayModeRef.current) {
@@ -1272,7 +1325,10 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
           <div className="flex items-center gap-1 pr-2 border-r border-[#2A2E39]">
             <button
               type="button"
-              onClick={() => setShowPairSelectorModal(true)}
+              onClick={() => {
+                liveMarketStreamer.prefetchAllFxTicks();
+                setShowPairSelectorModal(true);
+              }}
               className="px-2.5 py-1 rounded bg-[#2962FF] hover:bg-[#1E53E5] text-white text-xs font-bold font-mono flex items-center gap-1.5 transition-all cursor-pointer shadow-md shadow-[#2962FF]/30"
               title="Browse all 28 Forex, Metals & Crypto pairs"
             >
@@ -1326,9 +1382,16 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
             >
               {currentPrice.toFixed(decimals)}
             </span>
-            {sessionStatus.isOpen ? (
-              <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-[9px] text-[#00E676] font-bold">
-                REALTIME
+            {isLoadingHistory ? (
+              <span className="px-1.5 py-0.2 rounded bg-blue-500/20 text-[9px] text-sky-300 font-bold">
+                SYNCING...
+              </span>
+            ) : sessionStatus.isOpen ? (
+              <span
+                title={historyMeta ? `${historyMeta.count.toLocaleString()} historical bars · ${historyMeta.source}` : 'Live Feed'}
+                className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-[9px] text-[#00E676] font-bold"
+              >
+                {historyMeta ? `${historyMeta.count.toLocaleString()} BARS` : 'REALTIME'}
               </span>
             ) : (
               <span className="px-1.5 py-0.2 rounded bg-amber-500/20 text-[9px] text-amber-300 font-bold">
