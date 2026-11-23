@@ -78,6 +78,8 @@ export default async function handler(req: any, res: any) {
         { interval: '1h', range: '3mo' },
       ],
       '1D': [
+        { interval: '1d', range: '20y' },
+        { interval: '1d', range: '10y' },
         { interval: '1d', range: '5y' },
         { interval: '1d', range: '1y' },
       ],
@@ -142,6 +144,39 @@ export default async function handler(req: any, res: any) {
           const candles = Array.from(buckets.values()).sort((a, b) => a.time - b.time);
 
           if (candles.length >= 20) {
+            if (session.isOpen && symbol.includes('/')) {
+              try {
+                const [base, quote] = symbol.split('/');
+                const sqRes = await fetch(
+                  `https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/${encodeURIComponent(base)}/${encodeURIComponent(quote)}`
+                );
+                if (sqRes.ok) {
+                  const sqJson: any = await sqRes.json();
+                  const chosen =
+                    sqJson?.[0]?.spreadProfilePrices?.find((p: any) => p.spreadProfile === 'prime') ||
+                    sqJson?.[0]?.spreadProfilePrices?.[0];
+                  if (chosen && Number(chosen.bid) > 0 && Number(chosen.ask) > 0) {
+                    const liveMid = Number(((Number(chosen.bid) + Number(chosen.ask)) / 2).toFixed(dec));
+                    const lastBar = candles[candles.length - 1];
+                    const nowPeriod = Math.floor(Date.now() / 1000 / stepSec) * stepSec;
+                    if (lastBar.time >= nowPeriod) {
+                      lastBar.close = liveMid;
+                      lastBar.high = Number(Math.max(lastBar.high, liveMid).toFixed(dec));
+                      lastBar.low = Number(Math.min(lastBar.low, liveMid).toFixed(dec));
+                    } else {
+                      candles.push({
+                        time: nowPeriod,
+                        open: lastBar.close,
+                        high: Number(Math.max(lastBar.close, liveMid).toFixed(dec)),
+                        low: Number(Math.min(lastBar.close, liveMid).toFixed(dec)),
+                        close: liveMid,
+                        volume: 10,
+                      });
+                    }
+                  }
+                }
+              } catch (_e) {}
+            }
             const last = candles[candles.length - 1];
             const prev24 = candles[Math.max(0, candles.length - 25)] || candles[0];
             const changePct = prev24?.close
@@ -193,7 +228,24 @@ export default async function handler(req: any, res: any) {
       if (bRes.ok) {
         const raw: any[] = await bRes.json();
         if (Array.isArray(raw) && raw.length > 20) {
-          const candles = raw.map((k: any) => ({
+          let combined = raw;
+          for (let page = 0; page < 4; page++) {
+            try {
+              const earliestOpenMs = Number(combined[0][0]);
+              if (!earliestOpenMs) break;
+              const rPage = await fetch(
+                `${host}/api/v3/klines?symbol=${binancePair}&interval=${binanceInterval}&limit=1000&endTime=${earliestOpenMs - 1}`
+              );
+              if (!rPage.ok) break;
+              const prevBatch: any[] = await rPage.json();
+              if (!Array.isArray(prevBatch) || prevBatch.length === 0) break;
+              combined = [...prevBatch, ...combined];
+              if (prevBatch.length < 950) break;
+            } catch (_e) {
+              break;
+            }
+          }
+          const candles = combined.map((k: any) => ({
             time: Math.floor(k[0] / 1000),
             open: parseFloat(k[1]),
             high: parseFloat(k[2]),

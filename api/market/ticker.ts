@@ -47,14 +47,18 @@ export default async function handler(req: any, res: any) {
     change24hPct: number,
     volume24h: number,
     isLive: boolean,
-    source: string
+    source: string,
+    bidOverride?: number,
+    askOverride?: number
   ) => {
     const p = Number(price.toFixed(metaConfig.decimals));
+    const bidVal = bidOverride !== undefined ? Number(bidOverride.toFixed(metaConfig.decimals)) : Number((p - halfSpread).toFixed(metaConfig.decimals));
+    const askVal = askOverride !== undefined ? Number(askOverride.toFixed(metaConfig.decimals)) : Number((p + halfSpread).toFixed(metaConfig.decimals));
     return res.status(200).json({
       symbol,
       price: p,
-      bid: Number((p - halfSpread).toFixed(metaConfig.decimals)),
-      ask: Number((p + halfSpread).toFixed(metaConfig.decimals)),
+      bid: bidVal,
+      ask: askVal,
       high24h: Number(high24h.toFixed(metaConfig.decimals)),
       low24h: Number(low24h.toFixed(metaConfig.decimals)),
       change24hPct: Number(change24hPct.toFixed(2)),
@@ -77,6 +81,8 @@ export default async function handler(req: any, res: any) {
         if (br.ok) {
           const bd = await br.json();
           const p = parseFloat(bd.lastPrice);
+          const b = parseFloat(bd.bidPrice) || p - halfSpread;
+          const a = parseFloat(bd.askPrice) || p + halfSpread;
           if (p > 0) {
             return respond(
               p,
@@ -85,7 +91,9 @@ export default async function handler(req: any, res: any) {
               parseFloat(bd.priceChangePercent) || 0,
               parseFloat(bd.volume) || 45000,
               true,
-              'BINANCE VISION BTC/USD'
+              'BINANCE VISION BTC/USD',
+              b,
+              a
             );
           }
         }
@@ -103,7 +111,45 @@ export default async function handler(req: any, res: any) {
       } catch (_e) {}
     }
 
-    // Try Yahoo Finance query2 & query1 for all Forex pairs, XAG/USD, XAU/USD (and BTC fallback)
+    // Primary Institutional BBO live quote via Swissquote for all 25 FX pairs + XAU/USD + XAG/USD
+    if (symbol !== 'BTC/USD' && symbol.includes('/')) {
+      try {
+        const [base, quote] = symbol.split('/');
+        const sqRes = await fetch(
+          `https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/${encodeURIComponent(base)}/${encodeURIComponent(quote)}`
+        );
+        if (sqRes.ok) {
+          const sqJson: any = await sqRes.json();
+          if (Array.isArray(sqJson)) {
+            for (const feed of sqJson) {
+              const profiles: any[] = feed?.spreadProfilePrices || [];
+              const chosen =
+                profiles.find((p) => p.spreadProfile === 'prime') ||
+                profiles.find((p) => p.spreadProfile === 'standard') ||
+                profiles[0];
+              if (chosen && Number(chosen.bid) > 0 && Number(chosen.ask) > 0) {
+                const bid = Number(chosen.bid);
+                const ask = Number(chosen.ask);
+                const mid = (bid + ask) / 2;
+                return respond(
+                  mid,
+                  mid + metaConfig.defaultBracketDistance,
+                  mid - metaConfig.defaultBracketDistance,
+                  0.12,
+                  18500,
+                  true,
+                  `SWISSQUOTE BBO (${symbol})`,
+                  bid,
+                  ask
+                );
+              }
+            }
+          }
+        }
+      } catch (_e) {}
+    }
+
+    // Fallback: Yahoo Finance query2 & query1
     for (const host of ['query2.finance.yahoo.com', 'query1.finance.yahoo.com']) {
       try {
         const yr = await fetch(

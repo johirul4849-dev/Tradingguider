@@ -207,7 +207,7 @@ class LiveMarketStreamerService {
   private async fetchInstantTicker(sym: SupportedSymbol) {
     const session = getMarketSessionStatus(sym);
 
-    // 1. Direct ultra-fast Binance Vision / Coinbase for Crypto (BTC/USD)
+      // 1. Direct ultra-fast Binance Vision / Coinbase for Crypto (BTC/USD)
     if (sym === 'BTC/USD') {
       try {
         const bRes = await fetch(
@@ -216,6 +216,8 @@ class LiveMarketStreamerService {
         if (bRes.ok) {
           const pd = await bRes.json();
           const p = parseFloat(pd.lastPrice);
+          const b = parseFloat(pd.bidPrice);
+          const a = parseFloat(pd.askPrice);
           if (p > 0) {
             this.applyTickUpdate(
               sym,
@@ -224,7 +226,9 @@ class LiveMarketStreamerService {
               parseFloat(pd.lowPrice),
               parseFloat(pd.priceChangePercent),
               parseFloat(pd.volume),
-              true
+              true,
+              isFinite(b) && b > 0 ? b : undefined,
+              isFinite(a) && a > 0 ? a : undefined
             );
             this.setStatus('CONNECTED');
             return;
@@ -246,7 +250,7 @@ class LiveMarketStreamerService {
       } catch (_e) {}
     }
 
-    // 2. For all Forex pairs, Silver (XAG/USD), and Gold (XAU/USD): query backend Yahoo/Multi-source ticker
+    // 2. For all Forex pairs, Silver (XAG/USD), and Gold (XAU/USD): query backend Swissquote/Yahoo/Multi-source ticker
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 6000);
@@ -264,7 +268,9 @@ class LiveMarketStreamerService {
             d.low24h,
             d.change24hPct,
             d.volume24h,
-            d.marketOpen ?? session.isOpen
+            d.marketOpen ?? session.isOpen,
+            typeof d.bid === 'number' && d.bid > 0 ? d.bid : undefined,
+            typeof d.ask === 'number' && d.ask > 0 ? d.ask : undefined
           );
           this.setStatus('CONNECTED');
           return;
@@ -360,7 +366,9 @@ class LiveMarketStreamerService {
                 data.low24h,
                 data.change24hPct,
                 data.volume24h,
-                data.marketOpen
+                data.marketOpen,
+                typeof data.bid === 'number' && data.bid > 0 ? data.bid : undefined,
+                typeof data.ask === 'number' && data.ask > 0 ? data.ask : undefined
               );
               this.setStatus('CONNECTED');
             }
@@ -375,7 +383,7 @@ class LiveMarketStreamerService {
       }
     } catch (_err) {}
 
-    // 2. Direct Binance WebSocket ONLY for 24/7 BTC/USD (or XAU/USD when Forex market is open)
+    // 2. Direct Binance WebSocket ONLY for 24/7 BTC/USD (or XAU/USD fallback when Forex market is open)
     if (isCrypto || (isGold && getMarketSessionStatus(sym).isOpen)) {
       const binancePair = isGold ? 'paxgusdt' : 'btcusdt';
       try {
@@ -393,6 +401,8 @@ class LiveMarketStreamerService {
             const data = raw.data || raw;
             if (data.e === '24hrTicker' || data.c) {
               const price = parseFloat(data.c) || 0;
+              const bidP = parseFloat(data.b) || 0;
+              const askP = parseFloat(data.a) || 0;
               if (price > 0 && getMarketSessionStatus(sym).isOpen) {
                 this.applyTickUpdate(
                   sym,
@@ -401,7 +411,9 @@ class LiveMarketStreamerService {
                   parseFloat(data.l),
                   parseFloat(data.P),
                   parseFloat(data.v),
-                  true
+                  true,
+                  bidP > 0 ? bidP : undefined,
+                  askP > 0 ? askP : undefined
                 );
                 this.setStatus('CONNECTED');
               }
@@ -422,7 +434,9 @@ class LiveMarketStreamerService {
     low24?: number,
     changePct?: number,
     vol24?: number,
-    marketOpenOverride?: boolean
+    marketOpenOverride?: boolean,
+    bidOverride?: number,
+    askOverride?: number
   ) {
     if (price <= 0) return;
     this.lastTickTime = Date.now();
@@ -433,6 +447,14 @@ class LiveMarketStreamerService {
     const dec = meta.decimals;
     const halfSpread = meta.typicalSpread / 2;
     const roundedPrice = Number(price.toFixed(dec));
+    const bidVal =
+      bidOverride && bidOverride > 0
+        ? Number(bidOverride.toFixed(dec))
+        : Number((roundedPrice - halfSpread).toFixed(dec));
+    const askVal =
+      askOverride && askOverride > 0
+        ? Number(askOverride.toFixed(dec))
+        : Number((roundedPrice + halfSpread).toFixed(dec));
     const existing = this.latestTicks[sym];
     const isMarketOpen = marketOpenOverride ?? getMarketSessionStatus(sym).isOpen;
 
@@ -478,8 +500,8 @@ class LiveMarketStreamerService {
     const tick: LiveMarketTick = {
       symbol: sym,
       price: roundedPrice,
-      bid: Number((roundedPrice - halfSpread).toFixed(dec)),
-      ask: Number((roundedPrice + halfSpread).toFixed(dec)),
+      bid: bidVal,
+      ask: askVal,
       high24h: Number((high24 || existing?.high24h || roundedPrice * 1.01).toFixed(dec)),
       low24h: Number((low24 || existing?.low24h || roundedPrice * 0.99).toFixed(dec)),
       change24hPct: changePct ?? existing?.change24hPct ?? 0,

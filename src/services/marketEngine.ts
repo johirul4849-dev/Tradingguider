@@ -452,7 +452,30 @@ export class MarketDataProvider {
         if (res.ok) {
           const raw = await res.json();
           if (Array.isArray(raw) && raw.length > 20) {
-            const candles: CandleData[] = raw.map((k: any) => ({
+            let combined = raw;
+            const hostBase = bUrl.split('/api/v3/klines')[0];
+            for (let page = 0; page < 3; page++) {
+              try {
+                const earliestMs = Number(combined[0][0]);
+                if (!earliestMs) break;
+                const cPage = new AbortController();
+                const tPage = setTimeout(() => cPage.abort(), 3000);
+                const rPage = await fetch(
+                  `${hostBase}/api/v3/klines?symbol=${binanceSymbol}&interval=${binanceInterval}&limit=1000&endTime=${earliestMs - 1}`,
+                  { signal: cPage.signal }
+                );
+                clearTimeout(tPage);
+                if (!rPage.ok) break;
+                const prevBatch = await rPage.json();
+                if (!Array.isArray(prevBatch) || prevBatch.length === 0) break;
+                combined = [...prevBatch, ...combined];
+                if (prevBatch.length < 950) break;
+              } catch (_e) {
+                break;
+              }
+            }
+
+            const candles: CandleData[] = combined.map((k: any) => ({
               time: Math.floor(k[0] / 1000),
               open: parseFloat(k[1]),
               high: parseFloat(k[2]),

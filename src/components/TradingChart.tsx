@@ -318,11 +318,49 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const chartRef = useRef<IChartApi | null>(null);
   const mainSeriesRef = useRef<ISeriesApi<any> | null>(null);
   const overlaySeriesRefs = useRef<ISeriesApi<any>[]>([]);
+  const overlaySeriesMetaRef = useRef<
+    Array<{
+      id: string;
+      series: ISeriesApi<any>;
+      source: 'close' | 'open' | 'high' | 'low';
+      period: number;
+    }>
+  >([]);
   const candlesRef = useRef<CandleData[]>(candles);
   candlesRef.current = candles;
   const currentSeriesTypeRef = useRef<ChartVisualType | null>(null);
   const currentSeriesSymbolRef = useRef<SupportedSymbol | null>(null);
   const prevCandlesCountRef = useRef<number>(0);
+  const prevFirstTimeRef = useRef<number | null>(null);
+  const prevLastTimeRef = useRef<number | null>(null);
+  const prevTimeframeSeriesRef = useRef<SupportedTimeframe>(timeframe);
+  const prevIndicatorSigRef = useRef<string>('');
+
+  // Stable snapshot for heavy SMC / Backtest / Lesson analytics so intra-candle ticks do zero O(N) rescans
+  const [analyticsCandles, setAnalyticsCandles] = useState<CandleData[]>(candles);
+  const analyticsMetaRef = useRef<{ sym: string; tf: string; len: number; first: number; last: number }>({
+    sym: symbol,
+    tf: timeframe,
+    len: candles.length,
+    first: candles[0]?.time || 0,
+    last: candles[candles.length - 1]?.time || 0,
+  });
+
+  useEffect(() => {
+    const first = candles[0]?.time || 0;
+    const last = candles[candles.length - 1]?.time || 0;
+    const prev = analyticsMetaRef.current;
+    if (
+      prev.sym !== symbol ||
+      prev.tf !== timeframe ||
+      prev.len !== candles.length ||
+      prev.first !== first ||
+      prev.last !== last
+    ) {
+      analyticsMetaRef.current = { sym: symbol, tf: timeframe, len: candles.length, first, last };
+      setAnalyticsCandles(candles.length > 3500 ? candles.slice(-3500) : candles);
+    }
+  }, [candles, symbol, timeframe]);
 
   // Local state fallbacks for SMC & Educational Backtest Mentor
   const [internalHighImpactSmc, setInternalHighImpactSmc] = useState<boolean>(true);
@@ -356,8 +394,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
   const effectiveConfirmationCircles = useMemo(() => {
     if (propConfirmationCircles && propConfirmationCircles.length > 0) return propConfirmationCircles;
-    return AiBacktestTeacherEngine.runDeepAutoBacktest(candles, symbol, timeframe, aiLanguage).circles;
-  }, [propConfirmationCircles, candles, symbol, timeframe, aiLanguage]);
+    return AiBacktestTeacherEngine.runDeepAutoBacktest(analyticsCandles, symbol, timeframe, aiLanguage).circles;
+  }, [propConfirmationCircles, analyticsCandles, symbol, timeframe, aiLanguage]);
 
   const displayedConfirmationCircles = effectiveConfirmationCircles;
 
@@ -703,16 +741,110 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     };
   }, []);
 
-  // Update Series when candles, indicators or chart type changes
+  // Update Series when candles, indicators or chart type changes (O(1) incremental updates on live ticks!)
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart || candles.length === 0) return;
 
-    const candleDataToUse = chartType === 'heikin' ? computeHeikinAshi(candles) : candles;
     const sameSeriesType =
       currentSeriesTypeRef.current === chartType &&
       currentSeriesSymbolRef.current === symbol &&
       mainSeriesRef.current !== null;
+
+    const indicatorSig = indicators
+      .filter((i) => i.visible)
+      .map((i) => `${i.id}:${i.period}:${i.source}`)
+      .join('|');
+
+    const prevLen = prevCandlesCountRef.current;
+    const firstTime = candles[0]?.time ?? null;
+    const lastTime = candles[candles.length - 1]?.time ?? null;
+
+    const canIncrementalUpdate =
+      sameSeriesType &&
+      prevTimeframeSeriesRef.current === timeframe &&
+      prevIndicatorSigRef.current === indicatorSig &&
+      prevLen > 0 &&
+      candles.length >= prevLen &&
+      candles.length - prevLen <= 2 &&
+      firstTime !== null &&
+      firstTime === prevFirstTimeRef.current &&
+      prevLastTimeRef.current !== null &&
+      lastTime !== null &&
+      lastTime >= prevLastTimeRef.current;
+
+    if (canIncrementalUpdate && mainSeriesRef.current) {
+      const series = mainSeriesRef.current;
+      const updateCount = candles.length - prevLen + 1;
+      const tailSlice = candles.slice(-Math.max(60, updateCount + 20));
+      const heikinTail = chartType === 'heikin' ? computeHeikinAshi(tailSlice) : null;
+      const isCandleShape = chartType === 'candlestick' || chartType === 'heikin' || chartType === 'hollow';
+
+      for (let offset = updateCount; offset >= 1; offset--) {
+        const idx = candles.length - offset;
+        if (idx < 0) continue;
+        const bar = heikinTail ? heikinTail[heikinTail.length - offset] : candles[idx];
+        if (!bar) continue;
+        try {
+          if (isCandleShape) {
+            series.update({
+              time: bar.time as UTCTimestamp,
+              open: bar.open,
+              high: bar.high,
+              low: bar.low,
+              close: bar.close,
+            });
+          } else {
+            series.update({ time: bar.time as UTCTimestamp, value: bar.close });
+          }
+        } catch (_e) {}
+      }
+
+      // Incrementally update trailing point of active indicator overlays (no removeSeries!)
+      if (overlaySeriesMetaRef.current.length > 0) {
+        const indTail = candles.slice(-260);
+        const minUpdateTime = candles[Math.max(0, candles.length - updateCount)].time;
+
+        for (const meta of overlaySeriesMetaRef.current) {
+          try {
+            let pts: Array<{ time: number; value: number }> = [];
+            if (meta.id === 'ema20' || meta.id === 'ema50') {
+              pts = calculateEMA(indTail, meta.period, meta.source);
+            } else if (meta.id === 'sma200') {
+              pts = calculateSMA(indTail, meta.period, meta.source);
+            } else if (meta.id === 'vwap') {
+              pts = calculateVWAP(indTail);
+            } else if (meta.id === 'supertrend') {
+              pts = calculateSuperTrend(indTail, 10, 2.6);
+            } else if (meta.id === 'bb_u') {
+              pts = calculateBollingerBands(indTail, 20, 2).upper;
+            } else if (meta.id === 'bb_l') {
+              pts = calculateBollingerBands(indTail, 20, 2).lower;
+            }
+            for (let k = Math.max(0, pts.length - updateCount); k < pts.length; k++) {
+              const p = pts[k];
+              if (p && p.time >= minUpdateTime) {
+                meta.series.update({ time: p.time as UTCTimestamp, value: p.value });
+              }
+            }
+          } catch (_e) {}
+        }
+      }
+
+      if (candles.length > prevLen) {
+        try {
+          chart.timeScale().scrollToRealTime();
+        } catch (_e) {}
+      }
+
+      prevCandlesCountRef.current = candles.length;
+      prevLastTimeRef.current = lastTime;
+      requestAnimationFrame(syncPriceLineCoordinates);
+      return;
+    }
+
+    // FULL RENDER / RESET PATH (Symbol switch, Timeframe switch, Indicator toggle, ChartType switch, or Replay cut/jump)
+    const candleDataToUse = chartType === 'heikin' ? computeHeikinAshi(candles) : candles;
 
     if (!sameSeriesType) {
       if (mainSeriesRef.current) {
@@ -767,7 +899,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         });
       } else {
         series = chart.addSeries(BaselineSeries, {
-          baseValue: { type: 'price', price: currentClose },
+          baseValue: { type: 'price', price: candles[candles.length - 1]?.close || 0 },
           topFillColor1: 'rgba(8, 153, 129, 0.35)',
           topFillColor2: 'rgba(8, 153, 129, 0.05)',
           topLineColor: '#089981',
@@ -784,7 +916,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       currentSeriesSymbolRef.current = symbol;
     }
 
-    // Set series data smoothly
     const series = mainSeriesRef.current!;
     if (chartType === 'candlestick' || chartType === 'heikin') {
       series.setData(
@@ -810,31 +941,33 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       series.setData(candles.map((c) => ({ time: c.time as UTCTimestamp, value: c.close })));
     }
 
-    // When a brand new candle forms (1-2 bars added), scroll smoothly to real-time tip.
-    // When full historical dataset loads or symbol/timeframe swaps (size delta > 10), focus on latest ~115 bars.
-    const prevLen = prevCandlesCountRef.current;
-    if (Math.abs(candles.length - prevLen) > 10) {
+    if (Math.abs(candles.length - prevLen) > 10 || prevTimeframeSeriesRef.current !== timeframe || !sameSeriesType) {
       chart.timeScale().applyOptions({ barSpacing: 10 });
       chart.timeScale().setVisibleLogicalRange({
         from: Math.max(0, candles.length - 115),
         to: candles.length + 6,
       });
+      chart.priceScale('right').applyOptions({ autoScale: true });
     } else if (candles.length > prevLen && prevLen > 0) {
       try {
         chart.timeScale().scrollToRealTime();
       } catch (_e) {}
     }
-    prevCandlesCountRef.current = candles.length;
 
-    // Attach overlays
+    prevCandlesCountRef.current = candles.length;
+    prevFirstTimeRef.current = firstTime;
+    prevLastTimeRef.current = lastTime;
+    prevTimeframeSeriesRef.current = timeframe;
+    prevIndicatorSigRef.current = indicatorSig;
+
+    // Rebuild overlay series only on full reload or indicator toggle
     overlaySeriesRefs.current.forEach((s) => {
       try {
         chart.removeSeries(s);
-      } catch (_e) {
-        // ignore
-      }
+      } catch (_e) {}
     });
     overlaySeriesRefs.current = [];
+    overlaySeriesMetaRef.current = [];
 
     indicators.forEach((ind) => {
       if (!ind.visible) return;
@@ -848,6 +981,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         });
         s.setData(emaData.map((d) => ({ time: d.time as UTCTimestamp, value: d.value })));
         overlaySeriesRefs.current.push(s);
+        overlaySeriesMetaRef.current.push({ id: ind.id, series: s, source: ind.source, period: ind.period });
       } else if (ind.id === 'sma200') {
         const smaData = calculateSMA(candles, ind.period, ind.source);
         const s = chart.addSeries(LineSeries, {
@@ -858,6 +992,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         });
         s.setData(smaData.map((d) => ({ time: d.time as UTCTimestamp, value: d.value })));
         overlaySeriesRefs.current.push(s);
+        overlaySeriesMetaRef.current.push({ id: 'sma200', series: s, source: ind.source, period: ind.period });
       } else if (ind.id === 'vwap') {
         const vwapData = calculateVWAP(candles);
         const s = chart.addSeries(LineSeries, {
@@ -869,6 +1004,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         });
         s.setData(vwapData.map((d) => ({ time: d.time as UTCTimestamp, value: d.value })));
         overlaySeriesRefs.current.push(s);
+        overlaySeriesMetaRef.current.push({ id: 'vwap', series: s, source: ind.source, period: ind.period });
       } else if (ind.id === 'supertrend') {
         const stData = calculateSuperTrend(candles, 10, 2.6);
         const s = chart.addSeries(LineSeries, {
@@ -879,6 +1015,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         });
         s.setData(stData.map((d) => ({ time: d.time as UTCTimestamp, value: d.value })));
         overlaySeriesRefs.current.push(s);
+        overlaySeriesMetaRef.current.push({ id: 'supertrend', series: s, source: ind.source, period: ind.period });
       } else if (ind.id === 'bb') {
         const bb = calculateBollingerBands(candles, 20, 2);
         const u = chart.addSeries(LineSeries, {
@@ -896,14 +1033,15 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         u.setData(bb.upper.map((d) => ({ time: d.time as UTCTimestamp, value: d.value })));
         l.setData(bb.lower.map((d) => ({ time: d.time as UTCTimestamp, value: d.value })));
         overlaySeriesRefs.current.push(u, l);
+        overlaySeriesMetaRef.current.push(
+          { id: 'bb_u', series: u, source: ind.source, period: 20 },
+          { id: 'bb_l', series: l, source: ind.source, period: 20 }
+        );
       }
     });
 
-    if (chart && candles.length > 0) {
-      chart.priceScale('right').applyOptions({ autoScale: true });
-    }
     requestAnimationFrame(syncPriceLineCoordinates);
-  }, [candles, indicators, chartType, symbol, syncPriceLineCoordinates]);
+  }, [candles, indicators, chartType, symbol, timeframe, decimals, symbolMeta.tickSize, syncPriceLineCoordinates]);
 
   // Handle pair (symbol) or timeframe switch cleanly without squishing thousands of bars via fitContent()
   const prevSymbolRef = useRef<SupportedSymbol>(symbol);
@@ -1285,17 +1423,17 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     setSelectedDrawingId(dup.id);
   };
 
-  // Detect High-Impact SMC Elements & AI Trade Signals
+  // Detect High-Impact SMC Elements & AI Trade Signals (only recalculates on new candle/history swap)
   const smcData: HighImpactSMCData = useMemo(() => {
     return showHighImpactSmc
-      ? detectHighImpactSMCZonesAndMarkers(candles)
+      ? detectHighImpactSMCZonesAndMarkers(analyticsCandles)
       : { fvgs: [], bosLevels: [], chochLevels: [], sweeps: [], noTradeZones: [], aiSignals: [], tpTargetZones: [] };
-  }, [candles, showHighImpactSmc]);
+  }, [analyticsCandles, showHighImpactSmc]);
 
   // Lessons catalog fallback
   const effectiveLessons = useMemo(() => {
-    return propLessons.length > 0 ? propLessons : getHistoricalTradeLessons(candles, symbol, timeframe);
-  }, [propLessons, candles, symbol, timeframe]);
+    return propLessons.length > 0 ? propLessons : getHistoricalTradeLessons(analyticsCandles, symbol, timeframe);
+  }, [propLessons, analyticsCandles, symbol, timeframe]);
 
   // Live Dollar P&L for Draggable SL / TP Tags
   const orderRefPrice = effectiveEntry || currentClose;

@@ -195,7 +195,9 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
   // Live WebSocket Feed Connection State
   const [liveWsStatus, setLiveWsStatus] = useState<LiveStreamStatus>('CONNECTING');
   const [livePriceFlash, setLivePriceFlash] = useState<'up' | 'down' | null>(null);
+  const [liveBidAsk, setLiveBidAsk] = useState<{ bid: number; ask: number } | null>(null);
   const prevPriceRef = useRef<number>(0);
+  const flashTimerRef = useRef<any>(null);
 
   // Flyout Panels
   const [showOrderTicketFlyout, setShowOrderTicketFlyout] = useState<boolean>(false);
@@ -251,14 +253,27 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
   const [isTeacherModalOpen, setIsTeacherModalOpen] = useState<boolean>(false);
   const [showSniperHud, setShowSniperHud] = useState<boolean>(true);
 
-  // Deep Auto Backtest Report across 3-Month Candles
+  // Stable snapshot for heavy backtest scanning (only updates when history loads or bar closes, NEVER on 450ms price ticks)
+  const [analyticsCandles, setAnalyticsCandles] = useState<CandleData[]>(allCandles);
+  const analyticsSigRef = useRef<string>('');
+  useEffect(() => {
+    const first = allCandles[0]?.time || 0;
+    const last = allCandles[allCandles.length - 1]?.time || 0;
+    const sig = `${symbol}|${timeframe}|${allCandles.length}|${first}|${last}`;
+    if (analyticsSigRef.current !== sig) {
+      analyticsSigRef.current = sig;
+      setAnalyticsCandles(allCandles.length > 3500 ? allCandles.slice(-3500) : allCandles);
+    }
+  }, [allCandles, symbol, timeframe]);
+
+  // Deep Auto Backtest Report across recent historical window
   const deepBacktestReport: DeepBacktestReport = useMemo(() => {
-    return AiBacktestTeacherEngine.runDeepAutoBacktest(allCandles, symbol, timeframe, aiLanguage);
-  }, [allCandles, symbol, timeframe, aiLanguage]);
+    return AiBacktestTeacherEngine.runDeepAutoBacktest(analyticsCandles, symbol, timeframe, aiLanguage);
+  }, [analyticsCandles, symbol, timeframe, aiLanguage]);
 
   const historicalLessons = useMemo(() => {
-    return getHistoricalTradeLessons(allCandles, symbol, timeframe);
-  }, [allCandles, symbol, timeframe]);
+    return getHistoricalTradeLessons(analyticsCandles, symbol, timeframe);
+  }, [analyticsCandles, symbol, timeframe]);
 
   const handleReplayFromLesson = (lesson: HistoricalTradeLesson) => {
     const candleIdx = allCandles.findIndex((c) => c.time >= lesson.candleTime);
@@ -294,10 +309,14 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
 
   const currentPrice = currentCandle.close;
   const halfSpread = symbolMeta.typicalSpread / 2;
-  const bidPrice = Number((currentPrice - halfSpread).toFixed(decimals));
-  const askPrice = Number((currentPrice + halfSpread).toFixed(decimals));
+  const bidPrice = !isReplayMode && liveBidAsk && liveBidAsk.bid > 0
+    ? liveBidAsk.bid
+    : Number((currentPrice - halfSpread).toFixed(decimals));
+  const askPrice = !isReplayMode && liveBidAsk && liveBidAsk.ask > 0
+    ? liveBidAsk.ask
+    : Number((currentPrice + halfSpread).toFixed(decimals));
 
-  const oscSnapshot = calculateLatestOscillatorSnapshot(visibleCandles);
+  const oscSnapshot = useMemo(() => calculateLatestOscillatorSnapshot(visibleCandles), [visibleCandles]);
 
   const showToast = (text: string, tone: 'emerald' | 'crimson' | 'blue' = 'blue') => {
     setToastBanner({ text, tone });
@@ -441,10 +460,15 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
       // Freeze pair at its last close when market is closed (Fri 22:00 UTC -> Sun 22:00 UTC)
       if (!tick.marketOpen || !getMarketSessionStatus(symbol).isOpen) return;
 
+      if (tick.bid > 0 && tick.ask > 0) {
+        setLiveBidAsk({ bid: tick.bid, ask: tick.ask });
+      }
+
       // Pulse color flash on micro-tick
       if (prevPriceRef.current > 0 && tick.price !== prevPriceRef.current) {
         setLivePriceFlash(tick.price > prevPriceRef.current ? 'up' : 'down');
-        setTimeout(() => setLivePriceFlash(null), 250);
+        if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+        flashTimerRef.current = setTimeout(() => setLivePriceFlash(null), 260);
       }
       prevPriceRef.current = tick.price;
 
@@ -1222,7 +1246,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
     }, 800);
   };
 
-  // Jump History Helper
+  // Jump History Helper across full loaded history
   const handleJumpHistory = (candlesBackFromLive: number) => {
     setIsPlaying(false);
     if (candlesBackFromLive <= 0) {
@@ -1233,7 +1257,8 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
       setIsReplayMode(true);
       const targetIdx = Math.max(40, allCandles.length - 1 - candlesBackFromLive);
       setReplayIndex(targetIdx);
-      showToast(`Cut & Rewound ${candlesBackFromLive} candles into 3-month history!`, 'emerald');
+      const barDate = new Date((allCandles[targetIdx]?.time || 0) * 1000).toISOString().slice(0, 16).replace('T', ' ');
+      showToast(`✂ Rewound ${candlesBackFromLive.toLocaleString()} bars (${barDate} UTC) for Backtesting!`, 'emerald');
     }
   };
 
@@ -1370,7 +1395,7 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
               {!sessionStatus.isOpen ? `${symbol} CLOSED:` : `${symbol} LIVE:`}
             </span>
             <span
-              className={`font-extrabold font-mono transition-colors duration-150 text-xs sm:text-sm ${
+              className={`font-extrabold font-mono transition-colors duration-150 text-xs sm:text-sm tabular-nums ${
                 !sessionStatus.isOpen
                   ? 'text-amber-300'
                   : livePriceFlash === 'up'
@@ -1382,6 +1407,13 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
             >
               {currentPrice.toFixed(decimals)}
             </span>
+            {sessionStatus.isOpen && (
+              <span className="hidden lg:inline-flex items-center gap-1 text-[10px] font-mono text-[#94A3B8] border-l border-[#2A2E39] pl-1.5 tabular-nums">
+                <span className="text-[#F23645]">{bidPrice.toFixed(decimals)}</span>
+                <span>/</span>
+                <span className="text-[#089981]">{askPrice.toFixed(decimals)}</span>
+              </span>
+            )}
             {isLoadingHistory ? (
               <span className="px-1.5 py-0.2 rounded bg-blue-500/20 text-[9px] text-sky-300 font-bold">
                 SYNCING...
@@ -2156,25 +2188,53 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
                 <span>{isReplayCutMode ? 'Click Chart to Cut!' : '✂ Select & Cut Chart'}</span>
               </button>
 
-              <select
-                aria-label="Rewind history"
-                value=""
-                onChange={(e) => {
-                  const val = Number(e.target.value);
-                  if (!Number.isNaN(val)) handleJumpHistory(val);
-                }}
-                className="bg-[#131722] text-[#D1D4DC] px-2 py-1 rounded-lg border border-[#2A2E39] text-[11px] cursor-pointer"
-              >
-                <option value="" disabled>
-                  ⏪ Quick Cut...
-                </option>
-                <option value="1200">-90 Days (3M)</option>
-                <option value="800">-60 Days (2M)</option>
-                <option value="400">-30 Days (1M)</option>
-                <option value="120">-7 Days</option>
-                <option value="45">-1 Day</option>
-                <option value="0">🟢 Live Real-Time Feed</option>
-              </select>
+              {(() => {
+                const stepSec = TIMEFRAME_SECONDS[timeframe] || 900;
+                const maxBack = Math.max(10, allCandles.length - 45);
+                const candidates: Array<{ label: string; bars: number }> = [
+                  { label: '-1 Day', bars: Math.round(86400 / stepSec) },
+                  { label: '-3 Days', bars: Math.round((3 * 86400) / stepSec) },
+                  { label: '-1 Week', bars: Math.round((7 * 86400) / stepSec) },
+                  { label: '-1 Month', bars: Math.round((30 * 86400) / stepSec) },
+                  { label: '-3 Months', bars: Math.round((90 * 86400) / stepSec) },
+                  { label: '-6 Months', bars: Math.round((180 * 86400) / stepSec) },
+                  { label: '-1 Year', bars: Math.round((365 * 86400) / stepSec) },
+                  { label: '-2 Years', bars: Math.round((730 * 86400) / stepSec) },
+                  { label: '-5 Years', bars: Math.round((1825 * 86400) / stepSec) },
+                ].filter((opt) => opt.bars >= 20 && opt.bars < maxBack);
+
+                return (
+                  <select
+                    aria-label="Rewind history"
+                    value=""
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      if (!Number.isNaN(val)) handleJumpHistory(val);
+                    }}
+                    className="bg-[#131722] text-[#D1D4DC] px-2 py-1 rounded-lg border border-[#2A2E39] text-[11px] cursor-pointer"
+                  >
+                    <option value="" disabled>
+                      ⏪ Jump History ({allCandles.length.toLocaleString()} bars)
+                    </option>
+                    {candidates.map((c) => (
+                      <option key={c.label} value={c.bars}>
+                        {c.label} (-{c.bars.toLocaleString()} bars)
+                      </option>
+                    ))}
+                    {maxBack > 100 && (
+                      <option value={Math.round(maxBack * 0.5)}>
+                        50% History (-{Math.round(maxBack * 0.5).toLocaleString()} bars)
+                      </option>
+                    )}
+                    {maxBack > 50 && (
+                      <option value={maxBack}>
+                        ⏮ Earliest History Start (-{maxBack.toLocaleString()} bars)
+                      </option>
+                    )}
+                    <option value="0">🟢 Live Real-Time Feed</option>
+                  </select>
+                );
+              })()}
 
               <button
                 type="button"
@@ -2234,6 +2294,13 @@ export const TradingTerminalView: React.FC<TradingTerminalViewProps> = ({
                 }}
                 className="w-24 sm:w-40 accent-[#2962FF] cursor-pointer h-1.5 bg-[#131722] rounded-lg"
               />
+
+              {isReplayMode && (
+                <span className="hidden xl:inline text-[10px] text-[#94A3B8] font-mono tabular-nums px-1">
+                  #{(replayIndex + 1).toLocaleString()}/{allCandles.length.toLocaleString()} ·{' '}
+                  {new Date((currentCandle.time || 0) * 1000).toISOString().slice(0, 16).replace('T', ' ')}
+                </span>
+              )}
 
               {isReplayMode && replayIndex < allCandles.length - 1 && (
                 <button

@@ -189,6 +189,8 @@ const quoteCache = new Map<
     timestamp: number;
     data: {
       price: number;
+      bid?: number;
+      ask?: number;
       high24h: number;
       low24h: number;
       change24hPct: number;
@@ -198,6 +200,80 @@ const quoteCache = new Map<
     };
   }
 >();
+
+async function fetchSwissquoteLiveQuote(
+  metaConfig: MarketSymbolConfig
+): Promise<{
+  price: number;
+  bid: number;
+  ask: number;
+  high24h: number;
+  low24h: number;
+  change24hPct: number;
+  volume24h: number;
+  isLive: boolean;
+  source: string;
+} | null> {
+  if (metaConfig.id === 'BTC/USD' || !metaConfig.id.includes('/')) return null;
+  const [base, quote] = metaConfig.id.split('/');
+  if (!base || !quote) return null;
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3200);
+    const res = await fetch(
+      `https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/${encodeURIComponent(base)}/${encodeURIComponent(quote)}`,
+      {
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      }
+    );
+    clearTimeout(timeout);
+    if (!res.ok) return null;
+
+    const json: any = await res.json();
+    if (!Array.isArray(json) || json.length === 0) return null;
+
+    // Pick freshest valid BBO spread profile (prefer prime -> standard -> premium -> first)
+    let bestBid = 0;
+    let bestAsk = 0;
+    for (const feed of json) {
+      const profiles: any[] = feed?.spreadProfilePrices || [];
+      const chosen =
+        profiles.find((p) => p.spreadProfile === 'prime') ||
+        profiles.find((p) => p.spreadProfile === 'standard') ||
+        profiles.find((p) => p.spreadProfile === 'premium') ||
+        profiles[0];
+      if (chosen && Number(chosen.bid) > 0 && Number(chosen.ask) > 0) {
+        bestBid = Number(chosen.bid);
+        bestAsk = Number(chosen.ask);
+        break;
+      }
+    }
+
+    if (bestBid <= 0 || bestAsk <= 0) return null;
+
+    const dec = metaConfig.decimals;
+    const mid = Number(((bestBid + bestAsk) / 2).toFixed(dec));
+    const bid = Number(bestBid.toFixed(dec));
+    const ask = Number(bestAsk.toFixed(dec));
+    const prevCached = quoteCache.get(metaConfig.id)?.data;
+
+    return {
+      price: mid,
+      bid,
+      ask,
+      high24h: prevCached ? Number(Math.max(prevCached.high24h, mid).toFixed(dec)) : Number((mid + metaConfig.defaultBracketDistance).toFixed(dec)),
+      low24h: prevCached ? Number(Math.min(prevCached.low24h, mid).toFixed(dec)) : Number((mid - metaConfig.defaultBracketDistance).toFixed(dec)),
+      change24hPct: prevCached?.change24hPct ?? 0,
+      volume24h: (prevCached?.volume24h ?? 18500) + 1,
+      isLive: true,
+      source: `SWISSQUOTE BBO (${metaConfig.id})`,
+    };
+  } catch (_e) {
+    return null;
+  }
+}
 
 async function fetchYahooQuote(
   metaConfig: MarketSymbolConfig
@@ -306,6 +382,8 @@ async function fetchYahooCandles(
       { interval: '1h', range: '3mo' },
     ],
     '1D': [
+      { interval: '1d', range: '20y' },
+      { interval: '1d', range: '10y' },
       { interval: '1d', range: '5y' },
       { interval: '1d', range: '1y' },
     ],
@@ -446,6 +524,8 @@ async function fetchFrankfurterDailyFxCandles(
 // 1. Multi-Source Live Market Quote Engine (All 25 Forex Pairs, Gold, Silver, BTC/USD)
 async function fetchRealMarketQuote(rawSymbol: string): Promise<{
   price: number;
+  bid?: number;
+  ask?: number;
   high24h: number;
   low24h: number;
   change24hPct: number;
@@ -456,7 +536,7 @@ async function fetchRealMarketQuote(rawSymbol: string): Promise<{
   const metaConfig = resolveSymbolConfig(rawSymbol);
   const symbol = metaConfig.id;
   const cached = quoteCache.get(symbol);
-  if (cached && Date.now() - cached.timestamp < 1200) {
+  if (cached && Date.now() - cached.timestamp < 350) {
     return {
       ...cached.data,
       isLive: cached.data.isLive ?? true,
@@ -466,6 +546,8 @@ async function fetchRealMarketQuote(rawSymbol: string): Promise<{
 
   const saveQuote = (data: {
     price: number;
+    bid?: number;
+    ask?: number;
     high24h: number;
     low24h: number;
     change24hPct: number;
@@ -476,62 +558,6 @@ async function fetchRealMarketQuote(rawSymbol: string): Promise<{
     quoteCache.set(symbol, { timestamp: Date.now(), data });
     return data;
   };
-
-  if (symbol === 'XAU/USD') {
-    const yahooGold = await fetchYahooQuote(metaConfig);
-    if (yahooGold) return saveQuote(yahooGold);
-
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 2200);
-      const r = await fetch('https://api.gold-api.com/price/XAU', { signal: controller.signal });
-      clearTimeout(timeout);
-      if (r.ok) {
-        const d: any = await r.json();
-        if (d && d.price > 0) {
-          const price = Number(d.price.toFixed(2));
-          return saveQuote({
-            price,
-            high24h: Number((price * 1.006).toFixed(2)),
-            low24h: Number((price * 0.994).toFixed(2)),
-            change24hPct: 0.35,
-            volume24h: 12000,
-            isLive: true,
-            source: 'GOLD-API LIVE SPOT',
-          });
-        }
-      }
-    } catch (_e) {}
-
-    try {
-      const r = await fetch('https://data-api.binance.vision/api/v3/ticker/24hr?symbol=PAXGUSDT');
-      if (r.ok) {
-        const d: any = await r.json();
-        const price = parseFloat(d.lastPrice);
-        if (price > 0) {
-          return saveQuote({
-            price: Number(price.toFixed(2)),
-            high24h: Number(parseFloat(d.highPrice).toFixed(2)),
-            low24h: Number(parseFloat(d.lowPrice).toFixed(2)),
-            change24hPct: parseFloat(d.priceChangePercent),
-            volume24h: parseFloat(d.volume),
-            isLive: true,
-            source: 'BINANCE VISION GOLD (PAXG)',
-          });
-        }
-      }
-    } catch (_e) {}
-
-    return saveQuote({
-      price: metaConfig.defaultPrice,
-      high24h: Number((metaConfig.defaultPrice * 1.004).toFixed(2)),
-      low24h: Number((metaConfig.defaultPrice * 0.996).toFixed(2)),
-      change24hPct: 0.42,
-      volume24h: 15400,
-      isLive: false,
-      source: 'CALIBRATED BASELINE',
-    });
-  }
 
   if (symbol === 'BTC/USD') {
     for (const url of [
@@ -546,9 +572,13 @@ async function fetchRealMarketQuote(rawSymbol: string): Promise<{
         if (r.ok) {
           const d: any = await r.json();
           const price = parseFloat(d.lastPrice);
+          const bid = parseFloat(d.bidPrice) || price - metaConfig.typicalSpread / 2;
+          const ask = parseFloat(d.askPrice) || price + metaConfig.typicalSpread / 2;
           if (price > 0) {
             return saveQuote({
               price: Number(price.toFixed(2)),
+              bid: Number(bid.toFixed(2)),
+              ask: Number(ask.toFixed(2)),
               high24h: Number(parseFloat(d.highPrice).toFixed(2)),
               low24h: Number(parseFloat(d.lowPrice).toFixed(2)),
               change24hPct: parseFloat(d.priceChangePercent),
@@ -594,7 +624,68 @@ async function fetchRealMarketQuote(rawSymbol: string): Promise<{
     });
   }
 
-  // All 25 Forex Pairs & Silver (XAG/USD) via Yahoo Finance
+  // PRIMARY INSTITUTIONAL LIVE QUOTE FOR ALL 25 FOREX PAIRS + XAU/USD + XAG/USD: SWISSQUOTE BBO
+  const sqQuote = await fetchSwissquoteLiveQuote(metaConfig);
+  if (sqQuote) {
+    // Backfill 24h day stats lazily from cache or Yahoo if missing change24hPct
+    if (sqQuote.change24hPct === 0) {
+      const cachedHistory = Array.from(historyCache.entries()).find(([k]) => k.startsWith(`${symbol}_`))?.[1]?.payload;
+      if (cachedHistory && typeof cachedHistory.changePercent === 'number') {
+        sqQuote.change24hPct = cachedHistory.changePercent;
+        if (cachedHistory.high24h > 0) sqQuote.high24h = Math.max(sqQuote.high24h, cachedHistory.high24h);
+        if (cachedHistory.low24h > 0) sqQuote.low24h = Math.min(sqQuote.low24h, cachedHistory.low24h);
+      }
+    }
+    return saveQuote(sqQuote);
+  }
+
+  if (symbol === 'XAU/USD') {
+    const yahooGold = await fetchYahooQuote(metaConfig);
+    if (yahooGold) return saveQuote(yahooGold);
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2200);
+      const r = await fetch('https://api.gold-api.com/price/XAU', { signal: controller.signal });
+      clearTimeout(timeout);
+      if (r.ok) {
+        const d: any = await r.json();
+        if (d && d.price > 0) {
+          const price = Number(d.price.toFixed(2));
+          return saveQuote({
+            price,
+            high24h: Number((price * 1.006).toFixed(2)),
+            low24h: Number((price * 0.994).toFixed(2)),
+            change24hPct: 0.35,
+            volume24h: 12000,
+            isLive: true,
+            source: 'GOLD-API LIVE SPOT',
+          });
+        }
+      }
+    } catch (_e) {}
+
+    try {
+      const r = await fetch('https://data-api.binance.vision/api/v3/ticker/24hr?symbol=PAXGUSDT');
+      if (r.ok) {
+        const d: any = await r.json();
+        const price = parseFloat(d.lastPrice);
+        if (price > 0) {
+          return saveQuote({
+            price: Number(price.toFixed(2)),
+            high24h: Number(parseFloat(d.highPrice).toFixed(2)),
+            low24h: Number(parseFloat(d.lowPrice).toFixed(2)),
+            change24hPct: parseFloat(d.priceChangePercent),
+            volume24h: parseFloat(d.volume),
+            isLive: true,
+            source: 'BINANCE VISION GOLD (PAXG)',
+          });
+        }
+      }
+    } catch (_e) {}
+  }
+
+  // Fallback for all Forex pairs & Silver (XAG/USD) via Yahoo Finance
   const yahooFx = await fetchYahooQuote(metaConfig);
   if (yahooFx) return saveQuote(yahooFx);
 
@@ -640,8 +731,8 @@ app.get('/api/market/ticker', async (req, res) => {
   return res.json({
     symbol: metaConfig.id,
     price: quote.price,
-    bid: Number((quote.price - halfSpread).toFixed(metaConfig.decimals)),
-    ask: Number((quote.price + halfSpread).toFixed(metaConfig.decimals)),
+    bid: quote.bid ?? Number((quote.price - halfSpread).toFixed(metaConfig.decimals)),
+    ask: quote.ask ?? Number((quote.price + halfSpread).toFixed(metaConfig.decimals)),
     high24h: quote.high24h,
     low24h: quote.low24h,
     change24hPct: quote.change24hPct,
@@ -657,10 +748,11 @@ app.get('/api/market/ticker', async (req, res) => {
   });
 });
 
-// Real-Time Server-Sent Events (SSE) Stream with Market Hours Auto-Pause & Auto-Resume
+// Real-Time Server-Sent Events (SSE) Stream with Swissquote Institutional BBO + Market Hours Auto-Pause & Auto-Resume
 app.get('/api/market/stream', async (req, res) => {
   const metaConfig = resolveSymbolConfig(String(req.query.symbol || 'BTC/USD'));
   const symbol = metaConfig.id;
+  const halfSpread = metaConfig.typicalSpread / 2;
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -671,19 +763,26 @@ app.get('/api/market/stream', async (req, res) => {
   const initialSession = getMarketSessionStatus(symbol);
   const initialQuote = await fetchRealMarketQuote(symbol);
   let lastKnownPrice = initialQuote.price;
+  let lastBid = initialQuote.bid ?? Number((lastKnownPrice - halfSpread).toFixed(metaConfig.decimals));
+  let lastAsk = initialQuote.ask ?? Number((lastKnownPrice + halfSpread).toFixed(metaConfig.decimals));
   let lastHigh = initialQuote.high24h;
   let lastLow = initialQuote.low24h;
   let lastChange = initialQuote.change24hPct;
   let lastVol = initialQuote.volume24h;
+  let lastSource = initialQuote.source;
   let wasClosed = !initialSession.isOpen;
+  let isPolling = false;
 
   const initialPayload = JSON.stringify({
     symbol,
     price: lastKnownPrice,
+    bid: lastBid,
+    ask: lastAsk,
     high24h: lastHigh,
     low24h: lastLow,
     change24hPct: lastChange,
     volume24h: lastVol,
+    source: lastSource,
     marketOpen: initialSession.isOpen,
     marketStatusLabel: initialSession.statusLabel,
     countdownText: initialSession.countdownText,
@@ -711,10 +810,13 @@ app.get('/api/market/stream', async (req, res) => {
       const frozenPayload = JSON.stringify({
         symbol,
         price: lastKnownPrice,
+        bid: lastBid,
+        ask: lastAsk,
         high24h: lastHigh,
         low24h: lastLow,
         change24hPct: lastChange,
         volume24h: lastVol,
+        source: lastSource,
         marketOpen: false,
         marketStatusLabel: session.statusLabel,
         countdownText: session.countdownText,
@@ -730,35 +832,41 @@ app.get('/api/market/stream', async (req, res) => {
       return;
     }
 
-    // Auto-resume on Market Open transition OR real quote refresh every ~1.6s
-    if (wasClosed || pollCounter % 4 === 0) {
-      wasClosed = false;
+    // Fetch genuine real-time institutional Swissquote BBO / Binance quote every ~450ms (non-overlapping)
+    if (!isPolling) {
+      isPolling = true;
       try {
+        wasClosed = false;
         const q = await fetchRealMarketQuote(symbol);
         if (q.price > 0) {
           lastKnownPrice = q.price;
-          lastHigh = q.high24h;
-          lastLow = q.low24h;
-          lastChange = q.change24hPct;
+          lastBid = q.bid ?? Number((q.price - halfSpread).toFixed(metaConfig.decimals));
+          lastAsk = q.ask ?? Number((q.price + halfSpread).toFixed(metaConfig.decimals));
+          lastHigh = Math.max(lastHigh, q.high24h, q.price);
+          lastLow = Math.min(lastLow, q.low24h, q.price);
+          if (q.change24hPct !== 0) lastChange = q.change24hPct;
           lastVol = q.volume24h;
+          lastSource = q.source;
         }
       } catch (_e) {
         // retain lastKnownPrice
+      } finally {
+        isPolling = false;
       }
-    } else {
-      // Sub-second live micro-tick tightly anchored around real spot price
-      const microAmplitude = Math.max(metaConfig.tickSize * 1.5, lastKnownPrice * 0.000018);
-      const step = (Math.random() - 0.5) * microAmplitude;
-      lastKnownPrice = Number((lastKnownPrice + step).toFixed(metaConfig.decimals));
     }
+
+    if (!isAlive) return;
 
     const payload = JSON.stringify({
       symbol,
       price: lastKnownPrice,
+      bid: lastBid,
+      ask: lastAsk,
       high24h: Number(Math.max(lastHigh, lastKnownPrice).toFixed(metaConfig.decimals)),
       low24h: Number(Math.min(lastLow, lastKnownPrice).toFixed(metaConfig.decimals)),
       change24hPct: lastChange,
       volume24h: lastVol + pollCounter,
+      source: lastSource,
       marketOpen: true,
       marketStatusLabel: session.statusLabel,
       countdownText: session.countdownText,
@@ -772,7 +880,7 @@ app.get('/api/market/stream', async (req, res) => {
       isAlive = false;
       clearInterval(interval);
     }
-  }, 400);
+  }, 450);
 
   req.on('close', () => {
     isAlive = false;
@@ -786,11 +894,38 @@ app.get('/api/market/history', async (req, res) => {
   const timeframe = String(req.query.timeframe || '15m');
   const session = getMarketSessionStatus(symbol);
   const cacheKey = `${symbol}_${timeframe}`;
+  const stepSec = TIMEFRAME_SEC_MAP[timeframe] || 900;
 
   const cached = historyCache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < 15000) {
+  if (cached && Date.now() - cached.timestamp < 25000) {
+    const cloned = { ...cached.payload, candles: [...cached.payload.candles] };
+    if (session.isOpen && cloned.candles.length > 0) {
+      try {
+        const liveQ = await fetchRealMarketQuote(symbol);
+        if (liveQ.price > 0) {
+          const lastBar = { ...cloned.candles[cloned.candles.length - 1] };
+          const nowPeriod = Math.floor(Date.now() / 1000 / stepSec) * stepSec;
+          if (lastBar.time >= nowPeriod) {
+            lastBar.close = liveQ.price;
+            lastBar.high = Math.max(lastBar.high, liveQ.price);
+            lastBar.low = Math.min(lastBar.low, liveQ.price);
+            cloned.candles[cloned.candles.length - 1] = lastBar;
+          } else {
+            cloned.candles.push({
+              time: nowPeriod,
+              open: lastBar.close,
+              high: Math.max(lastBar.close, liveQ.price),
+              low: Math.min(lastBar.close, liveQ.price),
+              close: liveQ.price,
+              volume: 10,
+            });
+          }
+          cloned.price = liveQ.price;
+        }
+      } catch (_e) {}
+    }
     return res.json({
-      ...cached.payload,
+      ...cloned,
       marketOpen: session.isOpen,
       marketStatusLabel: session.statusLabel,
       countdownText: session.countdownText,
@@ -798,7 +933,7 @@ app.get('/api/market/history', async (req, res) => {
     });
   }
 
-  // Route ALL 25 Forex Pairs, XAG/USD, and XAU/USD through Yahoo Finance full historical bars
+  // Route ALL 25 Forex Pairs, XAG/USD, and XAU/USD through Yahoo Finance full historical bars + Swissquote Live Anchor
   if (symbol !== 'BTC/USD') {
     let fxCandles = await fetchYahooCandles(metaConfig, timeframe);
     let sourceLabel = `YAHOO INSTITUTIONAL FX/METALS (${metaConfig.yahooSymbol})`;
@@ -812,17 +947,29 @@ app.get('/api/market/history', async (req, res) => {
     }
 
     if (fxCandles.length >= 20) {
-      if (symbol === 'XAU/USD' && session.isOpen) {
+      if (session.isOpen) {
         try {
-          const gRes = await fetch('https://api.gold-api.com/price/XAU');
-          if (gRes.ok) {
-            const gData: any = await gRes.json();
-            if (gData && gData.price > 0) {
-              const lastBar = fxCandles[fxCandles.length - 1];
-              const liveGold = Number(gData.price.toFixed(2));
-              lastBar.close = liveGold;
-              lastBar.high = Math.max(lastBar.high, liveGold);
-              lastBar.low = Math.min(lastBar.low, liveGold);
+          const liveQ = await fetchRealMarketQuote(symbol);
+          if (liveQ.price > 0) {
+            const lastBar = fxCandles[fxCandles.length - 1];
+            const nowPeriod = Math.floor(Date.now() / 1000 / stepSec) * stepSec;
+            const livePrice = liveQ.price;
+            if (lastBar.time >= nowPeriod) {
+              lastBar.close = livePrice;
+              lastBar.high = Number(Math.max(lastBar.high, livePrice).toFixed(metaConfig.decimals));
+              lastBar.low = Number(Math.min(lastBar.low, livePrice).toFixed(metaConfig.decimals));
+            } else {
+              fxCandles.push({
+                time: nowPeriod,
+                open: lastBar.close,
+                high: Number(Math.max(lastBar.close, livePrice).toFixed(metaConfig.decimals)),
+                low: Number(Math.min(lastBar.close, livePrice).toFixed(metaConfig.decimals)),
+                close: livePrice,
+                volume: 12,
+              });
+            }
+            if (liveQ.source.includes('SWISSQUOTE')) {
+              sourceLabel = `${sourceLabel} + SWISSQUOTE LIVE`;
             }
           }
         } catch (_e) {}
@@ -855,7 +1002,7 @@ app.get('/api/market/history', async (req, res) => {
     }
   }
 
-  // BTC/USD (or Gold fallback): Binance Vision / Binance (fetch up to 2000 bars across 2 pages)
+  // BTC/USD (or Gold fallback): Binance Vision / Binance (fetch up to 5000 bars across 5 pages)
   const intervalMap: Record<string, string> = {
     '1m': '1m',
     '5m': '5m',
@@ -884,25 +1031,27 @@ app.get('/api/market/history', async (req, res) => {
           const rawBatch: any[] = await bRes.json();
           if (Array.isArray(rawBatch) && rawBatch.length > 20) {
             let combined = rawBatch;
-            // Attempt 2nd historical page for deeper backtest history (up to 2000 real candles)
-            try {
-              const earliestOpenMs = Number(rawBatch[0][0]);
-              if (earliestOpenMs > 0) {
-                const c2 = new AbortController();
-                const t2 = setTimeout(() => c2.abort(), 3500);
-                const r2 = await fetch(
+            // Paginate up to 4 earlier batches (up to 5,000 genuine candles for deep backtesting)
+            for (let page = 0; page < 4; page++) {
+              try {
+                const earliestOpenMs = Number(combined[0][0]);
+                if (!earliestOpenMs || earliestOpenMs <= 0) break;
+                const cPage = new AbortController();
+                const tPage = setTimeout(() => cPage.abort(), 3200);
+                const rPage = await fetch(
                   `${host}/api/v3/klines?symbol=${binancePair}&interval=${binanceInterval}&limit=1000&endTime=${earliestOpenMs - 1}`,
-                  { signal: c2.signal }
+                  { signal: cPage.signal }
                 );
-                clearTimeout(t2);
-                if (r2.ok) {
-                  const prevBatch: any[] = await r2.json();
-                  if (Array.isArray(prevBatch) && prevBatch.length > 0) {
-                    combined = [...prevBatch, ...rawBatch];
-                  }
-                }
+                clearTimeout(tPage);
+                if (!rPage.ok) break;
+                const prevBatch: any[] = await rPage.json();
+                if (!Array.isArray(prevBatch) || prevBatch.length === 0) break;
+                combined = [...prevBatch, ...combined];
+                if (prevBatch.length < 950) break;
+              } catch (_e) {
+                break;
               }
-            } catch (_e) {}
+            }
 
             const candles = combined.map((k) => ({
               time: Math.floor(Number(k[0]) / 1000),
